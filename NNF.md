@@ -15,7 +15,7 @@ Disabled libvirt & cpg plugins since they have undesirable build dependencies.
 
 ```
 ./autogen.sh
-PYTHON=python3 ./configure --disable-libvirt-plugin --disable-cpg-plugin --with-agents=nnf
+PYTHON=python3 ./configure --disable-libvirt-plugin --disable-cpg-plugin --with-agents="nnf redfish"
 make
 make install
 ```

@@ -27,7 +27,7 @@ import http
 sys.path.append("@FENCEAGENTSLIBDIR@")
 
 from fencing import *
-from fencing import fail, run_delay
+from fencing import fail, EC_STATUS, EC_LOGIN_DENIED, run_delay
 
 try:
     from kubernetes import client
@@ -89,9 +89,10 @@ def _get_nnf_node_power_status(api_client, options):
 
 def set_power_status(api_client, options):
 
-    if options.get("--action") == "on":
+    if options.get("--action") != "off":
         # NNF Fencing Agent is not permitted to enable the power status; that is done via
         # adminsitrator actions.
+        logging.debug("NNF Node does not support action '%s'", options.get("--action"))
         return
 
     api_object = client.CustomObjectsApi(api_client)
@@ -108,7 +109,9 @@ def set_power_status(api_client, options):
     )
 
     if not node["status"].get("fenced", False):
-        node["status"]["fenced"] = True
+        logging.info("Fencing NNF Node %s", namespace)
+
+        node["status"]["fenced"] = True if options.get("--action") == "off" else False
         api_object.patch_namespaced_custom_object_status(
             "nnf.cray.hpe.com",
             version,
@@ -197,8 +200,7 @@ def main():
 
     define_new_opts()
 
-    opt = process_input(device_opt)
-    options = check_input(device_opt, opt)
+    options = check_input(device_opt, process_input(device_opt))
 
     docs = {}
     docs["shortdesc"] = "Fencing agent for Near Node Flash"
@@ -231,5 +233,5 @@ def main():
 
     sys.exit(result)
 
-if __name__ == "__main__":
+if __name__ == "__main__":    
     main()
