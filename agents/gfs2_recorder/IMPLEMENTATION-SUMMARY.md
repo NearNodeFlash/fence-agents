@@ -17,8 +17,8 @@ Created a new custom fence agent `fence_gfs2_recorder` that runs on rabbit nodes
 - **Full OCF Compliance**: Implements standard Pacemaker resource agent interface
 - **GFS2 Discovery**: Multiple methods to identify GFS2 filesystems:
   - Kubernetes CRD queries (NnfStorage resources)
-  - SSH-based mount detection (fallback)
-  - DLM status checking
+  - DLM status checking (cluster-aware)
+  - Pacemaker configuration analysis (static)
 - **Triple Logging Format**:
   - `fence-events.log`: Operational debug log
   - `fence-events-readable.log`: Grep-friendly human format
@@ -90,21 +90,21 @@ Pacemaker → fence_ssh (actual fencing) + fence_gfs2_recorder (event logging)
 
    Identifies NnfStorage resources with GFS2 filesystem type
 
-2. **Fallback Method - SSH Mount Query**:
-
-   ```bash
-   ssh root@compute-node "mount -t gfs2"
-   ```
-
-   Directly queries mounted GFS2 filesystems on target node
-
-3. **Tertiary Check - DLM Status**:
+2. **Secondary Method - DLM Status Check**:
 
    ```bash
    pcs status resources | grep -i "dlm.*compute-node"
    ```
 
-   Verifies DLM activity indicating GFS2 usage
+   Queries Pacemaker for active DLM/GFS2 resources related to target node
+
+3. **Tertiary Method - Pacemaker Configuration**:
+
+   ```bash
+   pcs config show | grep -E '(gfs2|dlm)'
+   ```
+
+   Parses static cluster configuration for GFS2/DLM resource definitions
 
 ### Logging Format
 
@@ -325,7 +325,7 @@ chown root:root /var/log/gfs2-fencing/*
 ### Network Access
 
 - Requires kubectl access (optional, fallback available)
-- Requires SSH access to compute nodes (for mount detection)
+- Requires access to Pacemaker commands (pcs)
 - Runs with root privileges (Pacemaker requirement)
 
 ### Data Sensitivity

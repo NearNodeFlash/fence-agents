@@ -40,7 +40,7 @@ jq . /var/log/gfs2-fencing/fence-events-detailed.jsonl
 # Test discovery fallback
 KUBECTL_CMD=/bin/false fence_gfs2_recorder --action reboot --hostname compute-node-3
 
-# Should fall back to SSH-based discovery
+# Should fall back to DLM/Pacemaker configuration-based discovery
 grep "kubectl not available" /var/log/gfs2-fencing/fence-events.log
 ```
 
@@ -213,16 +213,16 @@ pcs stonith history
 cat /var/log/gfs2-fencing/fence-events-readable.log
 ```
 
-### Scenario 3: GFS2 Filesystem Access During Fence
+### Scenario 3: GFS2 Filesystem Context During Fence
 
 ```bash
-# On compute-node-3, mount a GFS2 filesystem
-ssh root@compute-node-3 "mount -t gfs2 /dev/vg_gfs2/lv_shared /mnt/gfs2"
+# Verify GFS2 resources are configured in Pacemaker
+pcs status resources | grep -E '(gfs2|dlm)'
 
-# Now fence the node
+# Now fence a node that has GFS2 configured
 pcs stonith fence compute-node-3
 
-# Check logs - should show GFS2 filesystem in use
+# Check logs - should show GFS2 context discovered via cluster state
 jq -r '.gfs2_filesystems[]' /var/log/gfs2-fencing/fence-events-detailed.jsonl
 ```
 
@@ -332,8 +332,8 @@ tail -50 /var/log/gfs2-fencing/fence-events.log
 # Test kubectl access
 kubectl get nnfstorage -A
 
-# Test SSH access to compute nodes
-ssh root@compute-node-3 "mount -t gfs2"
+# Test Pacemaker access
+pcs status resources | grep -E '(dlm|gfs2)'
 
 # Run with debug
 bash -x /usr/sbin/fence_gfs2_recorder --action monitor --hostname compute-node-3

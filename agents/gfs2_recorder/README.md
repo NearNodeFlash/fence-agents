@@ -38,8 +38,8 @@ This fence agent serves two primary purposes:
 - **GFS2 Discovery**: Automatically detects GFS2 filesystems associated with fenced nodes
 - **Multiple Discovery Methods**:
   - Kubernetes/NNF CRD-based (via `kubectl` and NnfStorage resources)
-  - SSH-based mount detection (fallback method)
-  - DLM status checking
+  - DLM status checking (cluster-aware)
+  - Pacemaker configuration analysis (static)
 - **Structured Logging**:
   - JSON Lines format for machine parsing
   - Human-readable format for manual review
@@ -205,17 +205,9 @@ Queries NnfStorage resources for GFS2 filesystems:
 kubectl get nnfstorage -A -o json | jq '.items[] | select(.spec.fileSystemType == "gfs2")'
 ```
 
-### Method 2: SSH Mount Query
+### Method 2: DLM Status Check
 
-Falls back to SSH-based mount detection:
-
-```bash
-ssh root@compute-node-3 "mount -t gfs2"
-```
-
-### Method 3: DLM Status Check
-
-Checks for active DLM resources:
+Checks for active DLM resources via Pacemaker:
 
 ```bash
 pcs status resources | grep -i "dlm.*compute-node-3"
@@ -261,7 +253,7 @@ sudo chown root:root /var/log/gfs2-fencing
 If kubectl is not available, the agent will:
 
 1. Log a warning
-2. Fall back to SSH-based GFS2 detection
+2. Fall back to DLM status and Pacemaker configuration checks
 3. Continue operating normally
 
 To enable kubectl support:
@@ -284,11 +276,11 @@ fence_gfs2_recorder --action monitor --hostname compute-node-3
 # Check logs
 tail -50 /var/log/gfs2-fencing/fence-events.log
 
-# Test kubectl access
+# Test Kubernetes access
 kubectl get nnfstorage -A
 
-# Test SSH access
-ssh root@compute-node-3 "mount -t gfs2"
+# Test Pacemaker commands
+pcs status resources | grep -E '(dlm|gfs2)'
 ```
 
 ### Agent Not Running in Pacemaker
@@ -333,8 +325,8 @@ EOF
 
 ## Security Considerations
 
-- **SSH Access**: Requires passwordless SSH to compute nodes for mount detection
 - **kubectl Access**: Requires cluster-admin kubeconfig for CRD queries
+- **Pacemaker Access**: Requires access to pcs commands for cluster state
 - **Log Files**: Contain sensitive cluster topology information
 - **File Permissions**: Logs are world-readable by default (0644)
 
