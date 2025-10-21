@@ -31,6 +31,8 @@ import json
 import logging
 import subprocess
 import socket
+import time
+import uuid
 from datetime import datetime, timezone
 import atexit
 
@@ -52,10 +54,15 @@ except ImportError:
 KUBECTL_CMD = os.environ.get("KUBECTL_CMD", "kubectl")
 LOG_DIR = os.environ.get("LOG_DIR", "/var/log/gfs2-fencing")
 FENCE_LOG = os.environ.get("FENCE_LOG", os.path.join(LOG_DIR, "fence-events.log"))
+REQUEST_DIR = os.environ.get("REQUEST_DIR", "/var/run/gfs2-fencing/requests")
+RESPONSE_DIR = os.environ.get("RESPONSE_DIR", "/var/run/gfs2-fencing/responses")
+FENCE_TIMEOUT = int(os.environ.get("FENCE_TIMEOUT", "60"))  # Default 60 second timeout
 GFS2_DISCOVERY_ENABLED = os.environ.get("GFS2_DISCOVERY_ENABLED", "true").lower() == "true"
 
-# Ensure log directory exists
+# Ensure directories exist
 os.makedirs(LOG_DIR, exist_ok=True)
+os.makedirs(REQUEST_DIR, exist_ok=True)
+os.makedirs(RESPONSE_DIR, exist_ok=True)
 
 # Setup logging
 logging.basicConfig(
@@ -128,6 +135,92 @@ def record_fence_event(action, target_node, gfs2_filesystems, status, details=""
     logging.info(f"Recorded fence event: action={action}, target={target_node}, status={status}")
 
 
+def write_fence_request(action, target_node, gfs2_filesystems):
+    """
+    Write a fence request file for external fencing component to process
+    
+    Returns the request_id (UUID) for tracking
+    """
+    request_id = str(uuid.uuid4())
+    request_file = os.path.join(REQUEST_DIR, f"{request_id}.json")
+    
+    request_data = {
+        "request_id": request_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "action": action,
+        "target_node": target_node,
+        "gfs2_filesystems": gfs2_filesystems,
+        "recorder_node": socket.gethostname()
+    }
+    
+    try:
+        with open(request_file, 'w') as f:
+            f.write(json.dumps(request_data, indent=2))
+        logging.info(f"Wrote fence request: {request_file}")
+        return request_id
+    except Exception as e:
+        logging.error(f"Failed to write fence request: {e}")
+        return None
+
+
+def wait_for_fence_response(request_id, timeout=60):
+    """
+    Wait for external fencing component to write response file
+    
+    Returns: (success: bool, message: str)
+    """
+    response_file = os.path.join(RESPONSE_DIR, f"{request_id}.json")
+    start_time = time.time()
+    poll_interval = 0.5  # Check every 500ms
+    
+    logging.info(f"Waiting for fence response: {response_file} (timeout={timeout}s)")
+    
+    while time.time() - start_time < timeout:
+        if os.path.exists(response_file):
+            try:
+                with open(response_file, 'r') as f:
+                    response_data = json.load(f)
+                
+                # Clean up response file
+                try:
+                    os.remove(response_file)
+                except:
+                    pass
+                
+                success = response_data.get("success", False)
+                message = response_data.get("message", "Fence operation completed")
+                actual_action = response_data.get("action_performed", "unknown")
+                
+                logging.info(f"Fence response received: success={success}, action={actual_action}, message={message}")
+                
+                return success, message, actual_action
+                
+            except Exception as e:
+                logging.error(f"Failed to read fence response: {e}")
+                return False, f"Failed to parse response: {e}", "error"
+        
+        time.sleep(poll_interval)
+    
+    # Timeout
+    logging.error(f"Fence response timeout after {timeout}s")
+    return False, f"Fence operation timed out after {timeout}s", "timeout"
+
+
+def cleanup_old_requests(max_age_seconds=300):
+    """Clean up request files older than max_age_seconds"""
+    try:
+        now = time.time()
+        for filename in os.listdir(REQUEST_DIR):
+            filepath = os.path.join(REQUEST_DIR, filename)
+            if os.path.isfile(filepath):
+                age = now - os.path.getmtime(filepath)
+                if age > max_age_seconds:
+                    os.remove(filepath)
+                    logging.debug(f"Cleaned up old request: {filename}")
+    except Exception as e:
+        logging.warning(f"Failed to cleanup old requests: {e}")
+
+
 def discover_gfs2_filesystems(compute_node):
     """Discover GFS2 filesystems accessible to a compute node"""
     
@@ -183,7 +276,6 @@ def try_kubectl_discovery(compute_node):
         )
         
         if kubectl_result.returncode == 0 and kubectl_result.stdout:
-            # Parse JSON directly in Python instead of using jq
             try:
                 data = json.loads(kubectl_result.stdout)
                 gfs2_list = [
@@ -362,7 +454,7 @@ def do_fence_action(conn, options):
     )
     
     # This is a RECORDER only - it doesn't actually perform fencing
-    # The actual fencing is done by the primary fence agent (fence_ssh, etc.)
+    # The actual fencing is done by the external component watching the requests.
     # We just log the event
     
     logging.info("Fence event recorded successfully")
@@ -447,27 +539,61 @@ Log Files Created:
     if options["--action"] == "monitor":
         sys.exit(do_action_monitor(options))
     
-    # For all other actions, record the fence event directly
+    # For all other actions, use request/response pattern
     target = options.get("--plug", "unknown")
+    action = options["--action"]
     
-    logging.info(f"Fence action requested: {options['--action']} for target: {target}")
+    logging.info(f"Fence action requested: {action} for target: {target}")
+    
+    # Cleanup old requests before creating new one
+    cleanup_old_requests()
     
     # Discover GFS2 filesystems
     gfs2_filesystems = discover_gfs2_filesystems(target)
     
     logging.info(f"GFS2 filesystems for {target}: {gfs2_filesystems}")
     
-    # Record the fence event
+    # Record the fence event (initial log)
     record_fence_event(
-        options["--action"],
+        action,
         target,
         gfs2_filesystems,
-        "initiated",
-        f"Fence action {options['--action']} initiated by Pacemaker"
+        "requested",
+        f"Fence action {action} requested by Pacemaker"
     )
     
-    logging.info("Fence event recorded successfully")
-    sys.exit(0)
+    # Write fence request for external component
+    request_id = write_fence_request(action, target, gfs2_filesystems)
+    
+    if not request_id:
+        logging.error("Failed to write fence request")
+        record_fence_event(action, target, gfs2_filesystems, "failed", "Failed to create fence request file")
+        sys.exit(1)
+    
+    # Wait for external fencing component to respond
+    success, message, actual_action = wait_for_fence_response(request_id, timeout=FENCE_TIMEOUT)
+    
+    # Record the final result
+    if success:
+        record_fence_event(
+            action,
+            target,
+            gfs2_filesystems,
+            "completed",
+            f"Fence action {actual_action} completed successfully: {message}"
+        )
+        logging.info(f"Fence operation successful: {message}")
+        sys.exit(0)
+    else:
+        record_fence_event(
+            action,
+            target,
+            gfs2_filesystems,
+            "failed",
+            f"Fence action {action} failed: {message}"
+        )
+        logging.error(f"Fence operation failed: {message}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
