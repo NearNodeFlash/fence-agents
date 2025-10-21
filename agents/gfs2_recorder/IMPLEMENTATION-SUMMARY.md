@@ -33,7 +33,7 @@ Created a new custom fence agent `fence_gfs2_recorder` that runs on rabbit nodes
 ```text
 ┌───────────────┐         ┌──────────────────────┐         ┌─────────────────────┐
 │   Pacemaker   │────────▶│  fence_gfs2_recorder │────────▶│   Request Files     │
-│   (Initiates  │         │   (Records & Waits)  │         │   /var/run/gfs2-    │
+│   (Initiates  │         │   (Records & Waits)  │         │   /localdisk/gfs2-  │
 │    Fencing)   │         └──────────────────────┘         │    fencing/requests │
 └───────────────┘                    ▲                     └─────────────────────┘
                                      │                                │
@@ -47,7 +47,7 @@ Created a new custom fence agent `fence_gfs2_recorder` that runs on rabbit nodes
                                      │                                │
                            ┌──────────────────────┐                   │ writes
                            │   Response Files     │◀──────────────────┘
-                           │   /var/run/gfs2-     │
+                           │   /localdisk/gfs2-   │
                            │    fencing/responses │
                            └──────────────────────┘
 ```
@@ -135,7 +135,7 @@ Created a new custom fence agent `fence_gfs2_recorder` that runs on rabbit nodes
 
 2. **fence_gfs2_recorder Creates Request**:
    - Discovers GFS2 filesystems for target node
-   - Writes request file: `/var/run/gfs2-fencing/requests/<uuid>.json`
+   - Writes request file: `/localdisk/gfs2-fencing/requests/<uuid>.json`
    - Includes: action, target node, GFS2 filesystems, timestamp
    - Logs "requested" status
 
@@ -143,7 +143,7 @@ Created a new custom fence agent `fence_gfs2_recorder` that runs on rabbit nodes
    - Watches request directory
    - Reads request file
    - Performs actual fencing operation (your custom logic)
-   - Writes response file: `/var/run/gfs2-fencing/responses/<uuid>.json`
+   - Writes response file: `/localdisk/gfs2-fencing/responses/<uuid>.json`
 
 4. **fence_gfs2_recorder Reads Response**:
    - Polls for response file (configurable timeout, default 60s)
@@ -248,7 +248,7 @@ The new request/response pattern **eliminates the need for fence_ssh**:
 
 - fence_gfs2_recorder runs on rabbit nodes (as stonith resource)
 - External fence watcher runs on rabbit nodes (as systemd service)
-- Both components coordinate via `/var/run/gfs2-fencing/` directories
+- Both components coordinate via `/localdisk/gfs2-fencing/` directories
 - No changes needed to existing DLM/GFS2 resource configuration
 
 ## Deployment Recommendations
@@ -266,7 +266,7 @@ clush -w "rabbit-node-1,rabbit-node-2,compute-node-2,compute-node-3,compute-node
 
 # Create directories
 clush -w "rabbit-node-1,rabbit-node-2,compute-node-2,compute-node-3,compute-node-4,compute-node-5" \
-  "mkdir -p /var/run/gfs2-fencing/requests /var/run/gfs2-fencing/responses"
+  "mkdir -p /localdisk/gfs2-fencing/requests /localdisk/gfs2-fencing/responses"
 ```
 
 ### Step 2: Deploy External Fence Watcher
@@ -440,10 +440,10 @@ WATCHER_PID=$!
 ./fence_gfs2_recorder.py --action reboot --plug test-node
 
 # Check request directory
-ls -l /var/run/gfs2-fencing/requests/
+ls -l /localdisk/gfs2-fencing/requests/
 
 # Check response directory
-ls -l /var/run/gfs2-fencing/responses/
+ls -l /localdisk/gfs2-fencing/responses/
 
 # Verify logs
 cat /var/log/gfs2-fencing/fence-events-readable.log
@@ -530,12 +530,12 @@ chmod 600 /var/log/gfs2-fencing/*.log
 chmod 600 /var/log/gfs2-fencing/*.jsonl
 
 # Request/response directories
-chmod 700 /var/run/gfs2-fencing/requests
-chmod 700 /var/run/gfs2-fencing/responses
+chmod 700 /localdisk/gfs2-fencing/requests
+chmod 700 /localdisk/gfs2-fencing/responses
 
 # Only root can read fence events
 chown root:root /var/log/gfs2-fencing/*
-chown root:root /var/run/gfs2-fencing/*
+chown root:root /localdisk/gfs2-fencing/*
 ```
 
 ### Network Access
@@ -650,7 +650,7 @@ clush -w "rabbit-node-1,rabbit-node-2" \
 
 # 3. Create directories
 clush -w "rabbit-node-1,rabbit-node-2,compute-node-2,compute-node-3,compute-node-4,compute-node-5" \
-  "mkdir -p /var/run/gfs2-fencing/requests /var/run/gfs2-fencing/responses /var/log/gfs2-fencing"
+  "mkdir -p /localdisk/gfs2-fencing/requests /localdisk/gfs2-fencing/responses /var/log/gfs2-fencing"
 
 # 4. Customize fencing logic (edit perform_fence_action() in fence_watcher.py)
 ssh root@rabbit-node-1 "vim /usr/local/bin/fence_watcher.py"

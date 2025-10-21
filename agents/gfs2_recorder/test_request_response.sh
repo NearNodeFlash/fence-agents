@@ -27,7 +27,7 @@ sleep 1
 # Show request file
 echo
 echo "3. Checking request directory..."
-ls -lh /var/run/gfs2-fencing/requests/ || echo "   No requests pending (already processed)"
+ls -lh /localdisk/gfs2-fencing/requests/ || echo "   No requests pending (already processed)"
 
 # Wait for fence to complete
 echo

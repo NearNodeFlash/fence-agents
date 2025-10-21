@@ -54,8 +54,8 @@ except ImportError:
 KUBECTL_CMD = os.environ.get("KUBECTL_CMD", "kubectl")
 LOG_DIR = os.environ.get("LOG_DIR", "/var/log/gfs2-fencing")
 FENCE_LOG = os.environ.get("FENCE_LOG", os.path.join(LOG_DIR, "fence-events.log"))
-REQUEST_DIR = os.environ.get("REQUEST_DIR", "/var/run/gfs2-fencing/requests")
-RESPONSE_DIR = os.environ.get("RESPONSE_DIR", "/var/run/gfs2-fencing/responses")
+REQUEST_DIR = os.environ.get("REQUEST_DIR", "/localdisk/gfs2-fencing/requests")
+RESPONSE_DIR = os.environ.get("RESPONSE_DIR", "/localdisk/gfs2-fencing/responses")
 FENCE_TIMEOUT = int(os.environ.get("FENCE_TIMEOUT", "60"))  # Default 60 second timeout
 GFS2_DISCOVERY_ENABLED = os.environ.get("GFS2_DISCOVERY_ENABLED", "true").lower() == "true"
 

@@ -9,7 +9,7 @@ The `fence_gfs2_recorder` uses a **request/response pattern** to decouple fence 
 ```text
 ┌─────────────────┐         ┌──────────────────────┐         ┌─────────────────────┐
 │   Pacemaker     │────────▶│  fence_gfs2_recorder │────────▶│   Request Files     │
-│   (Initiates    │         │   (Records & Waits)  │         │   /var/run/gfs2-    │
+│   (Initiates    │         │   (Records & Waits)  │         │   /localdisk/gfs2-  │
 │    Fencing)     │         └──────────────────────┘         │    fencing/requests │
 └─────────────────┘                    ▲                     └─────────────────────┘
                                        │                                │
@@ -25,7 +25,7 @@ The `fence_gfs2_recorder` uses a **request/response pattern** to decouple fence 
                                        │                                ▼
                              ┌──────────────────────┐         ┌─────────────────────┐
                              │   Response Files     │◀────────│   Performs Actual   │
-                             │   /var/run/gfs2-     │         │   Fencing Action    │
+                             │   /localdisk/gfs2-   │         │   Fencing Action    │
                              │    fencing/responses │         └─────────────────────┘
                              └──────────────────────┘
 ```
@@ -44,7 +44,7 @@ pcs stonith fence compute-node-3
 
 The fence agent creates a request file with a unique ID:
 
-**File**: `/var/run/gfs2-fencing/requests/<uuid>.json`
+**File**: `/localdisk/gfs2-fencing/requests/<uuid>.json`
 
 ```json
 {
@@ -68,7 +68,7 @@ Your external fencing component:
 
 ### 4. External Component Writes Response
 
-**File**: `/var/run/gfs2-fencing/responses/<uuid>.json`
+**File**: `/localdisk/gfs2-fencing/responses/<uuid>.json`
 
 ```json
 {
@@ -115,9 +115,9 @@ vim /usr/local/bin/fence_watcher.py
 
 Implement any mechanism that:
 
-1. Watches `/var/run/gfs2-fencing/requests/`
+1. Watches `/localdisk/gfs2-fencing/requests/`
 2. Processes `*.json` files
-3. Writes response files to `/var/run/gfs2-fencing/responses/`
+3. Writes response files to `/localdisk/gfs2-fencing/responses/`
 
 ### Step 3: Run the External Fence Component
 
@@ -169,8 +169,8 @@ tail -f /var/log/messages | grep fence-watcher
 ssh root@rabbit-node-1 "/usr/sbin/fence_gfs2_recorder --action reboot --plug compute-node-3"
 
 # Check request was created and processed
-ls -l /var/run/gfs2-fencing/requests/
-ls -l /var/run/gfs2-fencing/responses/
+ls -l /localdisk/gfs2-fencing/requests/
+ls -l /localdisk/gfs2-fencing/responses/
 
 # Check logs
 tail /var/log/gfs2-fencing/fence-events-readable.log
@@ -184,8 +184,8 @@ The fence agent supports these environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `REQUEST_DIR` | `/var/run/gfs2-fencing/requests` | Directory for fence requests |
-| `RESPONSE_DIR` | `/var/run/gfs2-fencing/responses` | Directory for fence responses |
+| `REQUEST_DIR` | `/localdisk/gfs2-fencing/requests` | Directory for fence requests |
+| `RESPONSE_DIR` | `/localdisk/gfs2-fencing/responses` | Directory for fence responses |
 | `FENCE_TIMEOUT` | `60` | Timeout in seconds to wait for response |
 | `GFS2_DISCOVERY_ENABLED` | `true` | Enable/disable GFS2 discovery |
 
@@ -298,7 +298,7 @@ def perform_fence_action(action, target_node, gfs2_filesystems):
 systemctl status fence-watcher.service
 
 # Check request directory
-ls -l /var/run/gfs2-fencing/requests/
+ls -l /localdisk/gfs2-fencing/requests/
 
 # Check logs
 journalctl -u fence-watcher.service -f
@@ -308,7 +308,7 @@ journalctl -u fence-watcher.service -f
 
 ```bash
 # Check response directory permissions
-ls -ld /var/run/gfs2-fencing/responses/
+ls -ld /localdisk/gfs2-fencing/responses/
 
 # Check fence_gfs2_recorder logs
 tail -f /var/log/gfs2-fencing/fence-events.log

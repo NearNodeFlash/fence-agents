@@ -17,8 +17,8 @@ import time
 import logging
 import glob
 
-REQUEST_DIR = os.environ.get("REQUEST_DIR", "/var/run/gfs2-fencing/requests")
-RESPONSE_DIR = os.environ.get("RESPONSE_DIR", "/var/run/gfs2-fencing/responses")
+REQUEST_DIR = os.environ.get("REQUEST_DIR", "/localdisk/gfs2-fencing/requests")
+RESPONSE_DIR = os.environ.get("RESPONSE_DIR", "/localdisk/gfs2-fencing/responses")
 POLL_INTERVAL = float(os.environ.get("POLL_INTERVAL", "0.5"))  # Check every 500ms
 
 # Setup logging
