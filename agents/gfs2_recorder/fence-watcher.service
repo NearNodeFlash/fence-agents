@@ -1,0 +1,20 @@
+[Unit]
+Description=GFS2 Fence Request Watcher
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/fence_watcher.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fence-watcher
+
+# Environment variables (optional overrides)
+#Environment="REQUEST_DIR=/localdisk/gfs2-fencing/requests"
+#Environment="RESPONSE_DIR=/localdisk/gfs2-fencing/responses"
+#Environment="POLL_INTERVAL=0.5"
+
+[Install]
+WantedBy=multi-user.target
