@@ -50,12 +50,19 @@ except ImportError:
     def fail_usage(message): sys.exit(1)
     def atexit_handler(): pass
 
+# Import configuration
+try:
+    from config import REQUEST_DIR, RESPONSE_DIR
+except ImportError:
+    # Fallback to default values if config.py not available
+    REQUEST_DIR = "/localdisk/gfs2-fencing/requests"
+    RESPONSE_DIR = "/localdisk/gfs2-fencing/responses"
+
 # Configuration
 KUBECTL_CMD = os.environ.get("KUBECTL_CMD", "kubectl")
 LOG_DIR = os.environ.get("LOG_DIR", "/var/log/gfs2-fencing")
 FENCE_LOG = os.environ.get("FENCE_LOG", os.path.join(LOG_DIR, "fence-events.log"))
-REQUEST_DIR = os.environ.get("REQUEST_DIR", "/localdisk/gfs2-fencing/requests")
-RESPONSE_DIR = os.environ.get("RESPONSE_DIR", "/localdisk/gfs2-fencing/responses")
+# REQUEST_DIR and RESPONSE_DIR now imported from config.py
 FENCE_TIMEOUT = int(os.environ.get("FENCE_TIMEOUT", "60"))  # Default 60 second timeout
 GFS2_DISCOVERY_ENABLED = os.environ.get("GFS2_DISCOVERY_ENABLED", "true").lower() == "true"
 
