@@ -183,17 +183,14 @@ def wait_for_fence_response(request_id, timeout=60):
                 with open(response_file, 'r') as f:
                     response_data = json.load(f)
                 
-                # Clean up response file
-                try:
-                    os.remove(response_file)
-                except:
-                    pass
+                # Do NOT delete response file - NNF software needs it to track fenced nodes
                 
                 success = response_data.get("success", False)
                 message = response_data.get("message", "Fence operation completed")
                 actual_action = response_data.get("action_performed", "unknown")
                 
                 logging.info(f"Fence response received: success={success}, action={actual_action}, message={message}")
+                logging.info(f"Response file preserved at: {response_file}")
                 
                 return success, message, actual_action
                 
@@ -357,7 +354,12 @@ Log Files Created:
     # Wait for external fencing component to respond
     success, message, actual_action = wait_for_fence_response(request_id, timeout=FENCE_TIMEOUT)
     
-    # Record the final result
+    # Record the final result and respond to Pacemaker via exit code
+    # Pacemaker invokes this agent as a subprocess and checks the exit code:
+    #   - Exit code 0 = fencing succeeded
+    #   - Exit code 1 (or any non-zero) = fencing failed
+    # This is the standard STONITH/fence agent protocol
+    
     if success:
         record_fence_event(
             action,
@@ -366,6 +368,7 @@ Log Files Created:
             f"Fence action {actual_action} completed successfully: {message}"
         )
         logging.info(f"Fence operation successful: {message}")
+        # Exit 0 tells Pacemaker: fencing succeeded
         sys.exit(0)
     else:
         record_fence_event(
@@ -375,6 +378,7 @@ Log Files Created:
             f"Fence action {action} failed: {message}"
         )
         logging.error(f"Fence operation failed: {message}")
+        # Exit 1 tells Pacemaker: fencing failed
         sys.exit(1)
 
 
