@@ -2,50 +2,62 @@
 
 ## Overview
 
-`fence_gfs2_recorder` is a specialized Pacemaker fence agent that runs on rabbit nodes to record GFS2-related fencing events. Unlike traditional fence agents that perform actual node fencing (shutdown/reboot), this agent acts as a **passive recorder** that logs all fencing events with detailed context about GFS2 filesystems.
+`fence_gfs2_recorder` is a specialized Pacemaker fence agent that integrates with NearNodeFlash (NNF) storage systems. It uses a **request/response pattern** to coordinate fencing operations with the NNF storage infrastructure, ensuring proper storage detachment before node fencing occurs.
 
 ## Purpose
 
-This fence agent serves two primary purposes:
+This fence agent serves three primary purposes:
 
-1. **Audit Trail**: Creates comprehensive logs of all fencing actions for compliance and troubleshooting
-2. **GFS2 Context**: Captures which GFS2 filesystems were in use during fencing events
+1. **NNF Integration**: Coordinates with NnfNodeBlockStorage Reconciler to safely detach NVMe namespaces before fencing
+2. **Request/Response Pattern**: Provides asynchronous communication between Pacemaker and NNF storage systems
+3. **Audit Trail**: Creates comprehensive logs of all fencing actions and storage operations
 
 ## Architecture
 
 ```text
 ┌─────────────────────┐
-│  Pacemaker/Corosync │
+│  Pacemaker/Corosync │ 
 │   (Rabbit Node)     │
 └──────────┬──────────┘
            │
-           ├─────────────────────────────┬─────────────────────────────┐
-           │                             │                             │
-           v                             v                             v
-┌──────────────────────┐    ┌──────────────────────┐    ┌──────────────────────┐
-│  Primary Fence Agent │    │  fence_gfs2_recorder │    │   DLM/GFS2 Services  │
-│   (fence_ssh)        │    │  (This Agent)        │    │                      │
-└──────────────────────┘    └──────────────────────┘    └──────────────────────┘
-           │                             │                             │
-           │                             │                             │
-           v                             v                             v
-    Performs actual               Records event               Provides context
-    node fencing                  to log files                about GFS2 usage
+           │ Calls fence_gfs2_recorder
+           │
+           v
+┌──────────────────────┐      ┌─────────────────────────────┐
+│  fence_gfs2_recorder │────▶ │   Request File              │
+│  (This Agent)        │      │   /localdisk/gfs2-fencing/  │
+└──────────────────────┘      │   requests/<uuid>.json      │
+           │                  └─────────────────────────────┘
+           │                                 │
+           │ Waits for response              │ NNF reads request
+           │                                 │
+           v                                 v
+┌─────────────────────────────┐      ┌─────────────────────────────┐
+│   Response File             │◀──── │ NnfNodeBlockStorage         │
+│   /localdisk/gfs2-fencing/  │      │ Reconciler                  │
+│   responses/<uuid>.json     │      │ (Kubernetes Pod)            │
+└─────────────────────────────┘      └─────────────────────────────┘
+           │                                 │
+           │ Response indicates success      │ Detaches NVMe namespaces
+           │                                 │
+           v                                 v
+┌──────────────────────┐               ┌─────────────────────────────┐
+│      Pacemaker       │               │      NNF Storage            │
+│   (Exit Code 0/1)    │               │   (Safe State)              │
+└──────────────────────┘               └─────────────────────────────┘
 ```
 
 ## Features
 
-- **GFS2 Discovery**: Automatically detects GFS2 filesystems associated with fenced nodes
-- **Multiple Discovery Methods**:
-  - Kubernetes/NNF CRD-based (via `kubectl` and NnfStorage resources)
-  - DLM status checking (cluster-aware)
-  - Pacemaker configuration analysis (static)
+- **Request/Response Pattern**: File-based communication with NNF storage systems
+- **NNF Integration**: Coordinates with NnfNodeBlockStorage Reconciler for safe storage operations
+- **Timeout Handling**: Configurable timeout with fallback on NNF response delays
 - **Structured Logging**:
   - JSON Lines format for machine parsing
   - Human-readable format for manual review
-  - Traditional syslog integration
+  - Detailed event logging with timestamps and context
 - **Pacemaker Integration**: Full OCF compliance with standard fence agent interface
-- **Zero Impact**: Passive recorder doesn't interfere with actual fencing operations
+- **Storage Safety**: Ensures proper NVMe namespace detachment before proceeding with fencing
 
 ## Log Files
 
@@ -74,7 +86,7 @@ Concise, grep-friendly format:
 JSON Lines format for programmatic analysis:
 
 ```json
-{"timestamp": "2025-01-10T14:23:16Z", "action": "reboot", "target_node": "compute-node-3", "gfs2_filesystems": ["nnf-storage-1", "nnf-storage-4"], "status": "initiated", "details": "Fence action reboot initiated by Pacemaker", "recorder_node": "rabbit-node-1", "pacemaker_action": "reboot"}
+{"timestamp": "2025-01-10T14:23:16Z", "action": "reboot", "target_node": "compute-node-3", "status": "completed", "details": "Successfully fenced node by deleting 1 GFS2 storage groups", "recorder_node": "rabbit-node-1", "pacemaker_action": "reboot"}
 ```
 
 ## Installation
@@ -103,35 +115,39 @@ fence_gfs2_recorder --action monitor --hostname compute-node-2
 
 ## Pacemaker Configuration
 
-### As Standalone Resource (Recommended)
+### As STONITH Resource (Recommended)
 
-Run the recorder as a passive resource that monitors all fencing events:
+Configure as the primary fence agent for compute nodes:
 
 ```bash
-# Create the recorder resource
-pcs resource create gfs2-fence-recorder fence_gfs2_recorder \
-    op monitor interval=120s timeout=10s \
-    op start timeout=10s \
-    op stop timeout=10s
+# Create STONITH resource for each compute node
+pcs stonith create compute-node-2-fence fence_gfs2_recorder \
+    port=compute-node-2 \
+    op monitor interval=60s timeout=10s \
+    meta env="FENCE_TIMEOUT=90"
 
-# Ensure it runs on rabbit nodes
-pcs constraint location gfs2-fence-recorder rule score=1000 \
-    hostname eq rabbit-node-1 or hostname eq rabbit-node-2
+pcs stonith create compute-node-3-fence fence_gfs2_recorder \
+    port=compute-node-3 \
+    op monitor interval=60s timeout=10s \
+    meta env="FENCE_TIMEOUT=90"
 
-# Start the resource
-pcs resource enable gfs2-fence-recorder
+# Enable fencing
+pcs property set stonith-enabled=true
+pcs property set stonith-action=reboot
 ```
 
-### As Stonith Notification Handler
+### Directory Setup
 
-Configure Pacemaker to call the recorder during stonith events:
+Ensure request/response directories exist and are accessible:
 
 ```bash
-# Create stonith notification property
-pcs property set stonith-action-timeout=60s
+# Create directories
+sudo mkdir -p /localdisk/gfs2-fencing/{requests,responses}
+sudo chmod 755 /localdisk/gfs2-fencing/{requests,responses}
 
-# The recorder will automatically be invoked by Pacemaker stonith subsystem
-# when any fence action occurs
+# If using NFS, ensure proper mounting
+# Add to /etc/fstab if needed:
+# nfs-server:/path/to/gfs2-fencing /localdisk/gfs2-fencing nfs defaults 0 0
 ```
 
 ## Usage Examples
@@ -171,68 +187,94 @@ jq -r 'select(.target_node == "compute-node-3") | .gfs2_filesystems[]' \
 
 ## Configuration Options
 
+### Configuration Files
+
+Request/response directories are configured in `config.py` (shared with NNF):
+
+```python
+# Directory where fence agents write fence request files
+REQUEST_DIR = "/localdisk/gfs2-fencing/requests"
+
+# Directory where nnf-sos writes fence response files
+RESPONSE_DIR = "/localdisk/gfs2-fencing/responses"
+```
+
 ### Environment Variables
 
-- `KUBECTL_CMD`: Path to kubectl command (default: `kubectl`)
+- `FENCE_TIMEOUT`: Response timeout in seconds (default: `60`)
 - `LOG_DIR`: Log directory (default: `/var/log/gfs2-fencing`)
 - `FENCE_LOG`: Main log file (default: `$LOG_DIR/fence-events.log`)
-- `GFS2_DISCOVERY_ENABLED`: Enable GFS2 discovery (default: `true`)
 
 ### Command Line Options
 
 - `--log-dir <path>`: Override log directory
-- `--no-gfs2-discovery`: Disable automatic GFS2 filesystem discovery
 
 ### Example with Custom Configuration
 
 ```bash
-# Use custom log directory
-LOG_DIR=/data/fence-logs fence_gfs2_recorder --action reboot --hostname compute-node-2
+# Use custom timeout and log directory
+FENCE_TIMEOUT=120 LOG_DIR=/data/fence-logs \
+    fence_gfs2_recorder --action reboot --hostname compute-node-2
 
-# Disable GFS2 discovery
-fence_gfs2_recorder --action reboot --hostname compute-node-2 --no-gfs2-discovery
+# Override log directory via command line
+fence_gfs2_recorder --action reboot --hostname compute-node-2 --log-dir /custom/logs
 ```
 
-## GFS2 Discovery Methods
+## Request/Response Pattern
 
-The agent uses multiple methods to discover GFS2 filesystems:
+The agent implements a file-based communication pattern with the NNF system:
 
-### Method 1: Kubernetes CRD Query
+### 1. Request Phase
 
-Queries NnfStorage resources for GFS2 filesystems:
+Writes fence request to shared directory:
 
 ```bash
-kubectl get nnfstorage -A -o json | jq '.items[] | select(.spec.fileSystemType == "gfs2")'
+# Example request file: /localdisk/gfs2-fencing/requests/12345678-1234-1234-1234-123456789abc.json
+{
+  "request_id": "12345678-1234-1234-1234-123456789abc",
+  "timestamp": "2025-01-10T14:23:15Z",
+  "action": "reboot",
+  "target_node": "compute-node-3",
+  "recorder_node": "rabbit-node-1"
+}
 ```
 
-### Method 2: DLM Status Check
+### 2. Response Phase
 
-Checks for active DLM resources via Pacemaker:
+NnfNodeBlockStorage Reconciler processes request and writes response:
 
 ```bash
-pcs status resources | grep -i "dlm.*compute-node-3"
+# Example response file: /localdisk/gfs2-fencing/responses/12345678-1234-1234-1234-123456789abc.json
+{
+  "request_id": "12345678-1234-1234-1234-123456789abc",
+  "success": true,
+  "message": "Successfully fenced node by deleting 1 GFS2 storage groups",
+  "action_performed": "storage_detach",
+  "timestamp": "2025-01-10T14:23:16Z"
+}
 ```
 
-## Integration with Existing Fencing
+## Integration with NNF Storage
 
-This agent **does not replace** your existing fence agents. It works alongside them:
+This agent **replaces traditional fence agents** in NNF environments by coordinating storage operations:
 
-1. **Primary Fence Agent** (e.g., `fence_ssh`): Performs actual node fencing
-2. **fence_gfs2_recorder**: Records the event with GFS2 context
-3. Both agents run in parallel on rabbit nodes
+1. **Pacemaker**: Calls `fence_gfs2_recorder` as the primary STONITH agent
+2. **fence_gfs2_recorder**: Writes fence request and waits for NNF response
+3. **NnfNodeBlockStorage Reconciler**: Detaches NVMe namespaces and responds
+4. **Pacemaker**: Receives success/failure based on NNF response
 
 Example configuration:
 
 ```bash
-# Primary fence agent (actual fencing)
-pcs stonith create compute-node-3-fence fence_ssh \
+# NNF-integrated fence agent (replaces traditional fence agents)
+pcs stonith create compute-node-3-fence fence_gfs2_recorder \
     port=compute-node-3 \
-    identity_file=/root/.ssh/fence-key \
-    op monitor interval=60s
+    op monitor interval=60s timeout=10s \
+    meta env="FENCE_TIMEOUT=90"
 
-# GFS2 recorder (event logging)
-pcs resource create gfs2-fence-recorder fence_gfs2_recorder \
-    op monitor interval=120s
+# Ensure request/response directories are available
+sudo mkdir -p /localdisk/gfs2-fencing/{requests,responses}
+sudo chmod 755 /localdisk/gfs2-fencing/{requests,responses}
 ```
 
 ## Troubleshooting
@@ -248,26 +290,40 @@ sudo chmod 755 /var/log/gfs2-fencing
 sudo chown root:root /var/log/gfs2-fencing
 ```
 
-### kubectl Not Available
+### Request/Response Timeout
 
-If kubectl is not available, the agent will:
-
-1. Log a warning
-2. Fall back to DLM status and Pacemaker configuration checks
-3. Continue operating normally
-
-To enable kubectl support:
+If NNF responses are timing out:
 
 ```bash
-# Install kubectl
-curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+# Check NNF operator status
+kubectl get pods -n nnf-system -l app=nnf-controller-manager
 
-# Configure kubeconfig
-export KUBECONFIG=/etc/kubernetes/admin.conf
+# Check for pending NnfNodeBlockStorage resources
+kubectl get nnfnodeblockstorages -A
+
+# Increase fence timeout
+pcs resource update compute-node-3-fence \
+    meta env="FENCE_TIMEOUT=120"
+
+# Check NNF operator logs
+kubectl logs -n nnf-system -l app=nnf-controller-manager --tail=50
 ```
 
-### GFS2 Discovery Not Working
+### Response Directory Issues
+
+```bash
+# Check response directory permissions and NFS mount
+ls -ld /localdisk/gfs2-fencing/responses/
+mount | grep gfs2-fencing
+
+# Check for orphaned request files
+ls -la /localdisk/gfs2-fencing/requests/
+
+# Manually clean old requests
+find /localdisk/gfs2-fencing/requests/ -name "*.json" -mtime +1 -delete
+```
+
+### NNF Integration Not Working
 
 ```bash
 # Test manually
@@ -276,11 +332,13 @@ fence_gfs2_recorder --action monitor --hostname compute-node-3
 # Check logs
 tail -50 /var/log/gfs2-fencing/fence-events.log
 
-# Test Kubernetes access
-kubectl get nnfstorage -A
+# Verify NNF resources
+kubectl get nnfnodes -o wide
+kubectl get nnfstorages -A
 
-# Test Pacemaker commands
-pcs status resources | grep -E '(dlm|gfs2)'
+# Check request/response flow
+ls -la /localdisk/gfs2-fencing/requests/
+ls -la /localdisk/gfs2-fencing/responses/
 ```
 
 ### Agent Not Running in Pacemaker
@@ -375,7 +433,8 @@ jq -r '[.target_node, .gfs2_filesystems | length] | @csv' \
 
 ## References
 
+- [Request/Response Pattern Documentation](REQUEST-RESPONSE-PATTERN.md)
+- [Verification Script Usage](README_VERIFY.md)
 - [Pacemaker Fence Agent Development](https://github.com/ClusterLabs/fence-agents)
-- [GFS2 Fencing Requirements](../GFS2-FENCING-EXPLAINED.md)
 - [Cluster Configuration Summary](../../pacemaker-cluster-summary.md)
-- [NNF GFS2 Integration](https://github.com/NearNodeFlash/nnf-sos)
+- [NNF Storage Integration](https://github.com/NearNodeFlash/nnf-sos)

@@ -7,27 +7,27 @@ The `fence_gfs2_recorder` uses a **request/response pattern** to decouple fence 
 ## Architecture
 
 ```text
-┌─────────────────┐         ┌──────────────────────┐         ┌─────────────────────┐
-│   Pacemaker     │────────▶│  fence_gfs2_recorder │────────▶│   Request Files     │
-│   (Initiates    │         │   (Records & Waits)  │         │   /localdisk/gfs2-  │
-│    Fencing)     │         └──────────────────────┘         │    fencing/requests │
-└─────────────────┘                    ▲                     └─────────────────────┘
-                                       │                                │
-                                       │                                │ watches
-                                       │                                ▼
-                                       │                      ┌─────────────────────┐
-                                       │                      │ External Fence      │
-                                       │                      │ Component           │
-                                       │                      │ (Your Logic)        │
-                                       │                      └─────────────────────┘
-                                       │                                │
-                                       │                                │ writes
-                                       │                                ▼
-                             ┌──────────────────────┐         ┌─────────────────────┐
-                             │   Response Files     │◀────────│   Performs Actual   │
-                             │   /localdisk/gfs2-   │         │   Fencing Action    │
-                             │    fencing/responses │         └─────────────────────┘
-                             └──────────────────────┘
+┌─────────────────┐         ┌──────────────────────┐             ┌─────────────────────┐
+│   Pacemaker     │────────▶│  fence_gfs2_recorder │────────────▶│   Request Files     │
+│   (Initiates    │◀────────│   (Records & Waits)  │             │   /localdisk/gfs2-  │
+│    Fencing)     │  exit   │                      │             │    fencing/requests │
+└─────────────────┘  code   └──────────────────────┘             └─────────────────────┘
+                      ▲                   ▲                                │
+                      │                   │ reads                          │ watches
+                      │                   │ response                       ▼
+                      │                   │                      ┌─────────────────────┐
+                      │                   │                      │ NnfNodeBlockStorage │
+                      │                   │                      │ Reconciler          │
+                      │                   │                      │ (Kubernetes)        │
+                      │                   │                      └─────────────────────┘
+                      │                   │                                │
+                      │                   │                                │ writes
+                      │                   │                                ▼
+                      │         ┌──────────────────────┐         ┌───────────────────────┐
+                      └─────────│   Response Files     │◀────────│   Rabbit detaches     │
+                       0=success│   /localdisk/gfs2-   │         │   NVMe namespaces     │
+                       1=failure│    fencing/responses │         │   from fenced compute │
+                                └──────────────────────┘         └───────────────────────┘   
 ```
 
 ## How It Works
@@ -57,16 +57,16 @@ The fence agent creates a request file with a unique ID:
 }
 ```
 
-### 3. External Component Processes Request
+### 3. NnfNodeBlockStorage Reconciler Processes Request
 
-Your external fencing component:
+The NnfNodeBlockStorage Reconciler (Kubernetes controller):
 
-1. Watches the request directory
-2. Reads the request file
-3. Performs the actual fencing operation
-4. Writes a response file
+1. Watches the request directory for new fence requests
+2. Reads the request file and parses the target node
+3. Detaches NVMe namespaces from the fenced compute node
+4. Writes a response file confirming the fencing action
 
-### 4. External Component Writes Response
+### 4. NnfNodeBlockStorage Reconciler Writes Response
 
 **File**: `/localdisk/gfs2-fencing/responses/<uuid>.json`
 
@@ -76,7 +76,7 @@ Your external fencing component:
   "success": true,
   "action_performed": "reboot",
   "target_node": "compute-node-3",
-  "message": "Fence reboot succeeded for compute-node-3",
+  "message": "Successfully fenced node by deleting 1 GFS2 storage groups",
   "timestamp": "2025-10-20T14:30:15Z"
 }
 ```
@@ -95,228 +95,140 @@ The fence agent:
 
 The updated version is already configured with request/response support.
 
-### Step 2: Deploy the External Fence Component
+### Step 2: Deploy the NnfNodeBlockStorage Reconciler
 
-You have two options:
+The NnfNodeBlockStorage Reconciler is part of the NNF (Near Node Flash) software stack and runs as a Kubernetes controller. It automatically:
 
-#### Option A: Use the Simple Polling Script
+1. Watches for fence request files in `/localdisk/gfs2-fencing/requests/`
+2. Processes fence requests by detaching NVMe namespaces from compute nodes
+3. Updates NNFNode resources to reflect fenced status
+4. Writes response files to `/localdisk/gfs2-fencing/responses/`
 
-```bash
-# Copy the simple watcher
-cp external_fence_watcher_simple.py /usr/local/bin/fence_watcher.py
-chmod +x /usr/local/bin/fence_watcher.py
-
-# Edit to add your fencing logic
-vim /usr/local/bin/fence_watcher.py
-# Replace the perform_fence_action() function with your actual fencing mechanism
-```
-
-#### Option B: Create Your Own Watcher
-
-Implement any mechanism that:
-
-1. Watches `/localdisk/gfs2-fencing/requests/`
-2. Processes `*.json` files
-3. Writes response files to `/localdisk/gfs2-fencing/responses/`
-
-### Step 3: Run the External Fence Component
-
-#### As a systemd Service (Recommended)
-
-Create `/etc/systemd/system/fence-watcher.service`:
-
-```ini
-[Unit]
-Description=GFS2 Fence Request Watcher
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/fence_watcher.py
-Restart=always
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=fence-watcher
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable and start:
+The reconciler is deployed as part of the NNF operator:
 
 ```bash
-systemctl daemon-reload
-systemctl enable fence-watcher.service
-systemctl start fence-watcher.service
-systemctl status fence-watcher.service
+# Verify NNF operator is running
+kubectl get pods -n nnf-system
+
+# Check NnfNodeBlockStorage resources
+kubectl get nnfnodeblockstorage -A
+
+# Monitor reconciler logs
+kubectl logs -n nnf-system -l app=nnf-operator -f
 ```
 
-#### As a Background Process (Testing)
+### Step 3: Configure NNF Integration
+
+Ensure the NNF software has access to the fence request/response directories:
 
 ```bash
-# Run in background
-/usr/local/bin/fence_watcher.py &
+# Verify directories exist and are accessible
+ls -la /localdisk/gfs2-fencing/
+ls -la /localdisk/gfs2-fencing/requests/
+ls -la /localdisk/gfs2-fencing/responses/
 
-# Monitor logs
-tail -f /var/log/messages | grep fence-watcher
+# Check permissions (should be writable by NNF services)
+stat /localdisk/gfs2-fencing/requests/
+stat /localdisk/gfs2-fencing/responses/
 ```
 
 ### Step 4: Test the Integration
 
 ```bash
-# Test fence operation
-ssh root@rabbit-node-1 "/usr/sbin/fence_gfs2_recorder --action reboot --plug compute-node-3"
+# Test fence operation via Pacemaker
+pcs stonith fence rabbit-compute-2
 
 # Check request was created and processed
 ls -l /localdisk/gfs2-fencing/requests/
 ls -l /localdisk/gfs2-fencing/responses/
 
-# Check logs
+# Check fence logs
 tail /var/log/gfs2-fencing/fence-events-readable.log
+
+# Verify NNFNode status
+kubectl get nnfnode rabbit-compute-2 -o yaml
+
+# Check NnfNodeBlockStorage resources
+kubectl get nnfnodeblockstorage -A
 ```
 
 ## Configuration
 
-### Environment Variables
+### Configuration Files
 
-The fence agent supports these environment variables:
+The fence agent uses a hybrid approach: critical paths are hardcoded in `config.py` while runtime settings use environment variables:
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `REQUEST_DIR` | `/localdisk/gfs2-fencing/requests` | Directory for fence requests |
-| `RESPONSE_DIR` | `/localdisk/gfs2-fencing/responses` | Directory for fence responses |
-| `FENCE_TIMEOUT` | `60` | Timeout in seconds to wait for response |
-| `GFS2_DISCOVERY_ENABLED` | `true` | Enable/disable GFS2 discovery |
+| Setting | Source | Default | Description |
+|---------|--------|---------|-------------|
+| `REQUEST_DIR` | `config.py` | `/localdisk/gfs2-fencing/requests` | Directory for fence requests |
+| `RESPONSE_DIR` | `config.py` | `/localdisk/gfs2-fencing/responses` | Directory for fence responses |
+| `FENCE_TIMEOUT` | Environment | `60` | Timeout in seconds to wait for NNF response |
+| `LOG_DIR` | Environment | `/var/log/gfs2-fencing` | Directory for fence event logs |
+
+### config.py
+
+The request/response directories are shared between the fence agent and NNF software, configured in `config.py`:
+
+```python
+# Directory where fence agents write fence request files
+REQUEST_DIR = "/localdisk/gfs2-fencing/requests"
+
+# Directory where nnf-sos writes fence response files
+RESPONSE_DIR = "/localdisk/gfs2-fencing/responses"
+```
+
+**Important**: These paths must match between the fence agent and NNF repositories. If you modify `config.py`, ensure both repositories are updated.
 
 ### Pacemaker Configuration
 
-Set environment variables in the stonith resource:
+Configure timeout and log directory in the stonith resource:
 
 ```bash
+# Using environment variables (recommended)
 pcs resource update compute-node-2-fence-recorder \
     meta env="FENCE_TIMEOUT=90" \
-    meta env="GFS2_DISCOVERY_ENABLED=true"
+    meta env="LOG_DIR=/custom/log/path"
+
+# Alternative: Using command-line options
+pcs resource update compute-node-2-fence-recorder \
+    op monitor interval=60s \
+    params log-dir="/custom/log/path"
 ```
 
-## Implementing Your Fencing Logic
-
-Edit the `perform_fence_action()` function in your fence watcher:
-
-### Example 1: Using fence_nnf
-
-```python
-def perform_fence_action(action, target_node, gfs2_filesystems):
-    """Call fence_nnf to perform actual fencing"""
-    import subprocess
-    
-    try:
-        result = subprocess.run(
-            ["/usr/sbin/fence_nnf", "--action", action, "--plug", target_node],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-        
-        success = result.returncode == 0
-        message = f"fence_nnf {'succeeded' if success else 'failed'}: {result.stdout}"
-        
-        return success, message
-        
-    except Exception as e:
-        return False, f"Fence operation failed: {e}"
-```
-
-### Example 2: Using IPMI
-
-```python
-def perform_fence_action(action, target_node, gfs2_filesystems):
-    """Use IPMI to fence the node"""
-    import subprocess
-    
-    # Map actions to IPMI commands
-    ipmi_actions = {
-        "on": "power on",
-        "off": "power off",
-        "reboot": "power cycle"
-    }
-    
-    ipmi_cmd = ipmi_actions.get(action, "power cycle")
-    
-    try:
-        result = subprocess.run(
-            ["ipmitool", "-I", "lanplus", "-H", f"{target_node}-ipmi", 
-             "-U", "admin", "-P", "password", "chassis", "power", ipmi_cmd],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-        
-        success = result.returncode == 0
-        return success, f"IPMI {action} {'succeeded' if success else 'failed'}"
-        
-    except Exception as e:
-        return False, f"IPMI operation failed: {e}"
-```
-
-### Example 3: Using Cloud Provider API
-
-```python
-def perform_fence_action(action, target_node, gfs2_filesystems):
-    """Use AWS API to fence EC2 instance"""
-    import boto3
-    
-    try:
-        ec2 = boto3.client('ec2')
-        
-        # Get instance ID from node name
-        response = ec2.describe_instances(
-            Filters=[{'Name': 'tag:Name', 'Values': [target_node]}]
-        )
-        
-        instance_id = response['Reservations'][0]['Instances'][0]['InstanceId']
-        
-        if action == "off":
-            ec2.stop_instances(InstanceIds=[instance_id])
-        elif action == "on":
-            ec2.start_instances(InstanceIds=[instance_id])
-        elif action == "reboot":
-            ec2.reboot_instances(InstanceIds=[instance_id])
-        
-        return True, f"AWS EC2 {action} initiated for {instance_id}"
-        
-    except Exception as e:
-        return False, f"AWS operation failed: {e}"
-```
+**Note**: Environment variables take precedence over command-line options.
 
 ## Troubleshooting
 
 ### Fence Operation Times Out
 
 ```bash
-# Check if fence watcher is running
-systemctl status fence-watcher.service
+# Check if NNF operator is running
+kubectl get pods -n nnf-system -l app=nnf-controller-manager
 
-# Check request directory
-ls -l /localdisk/gfs2-fencing/requests/
+# Check NNFNode resources
+kubectl get nnfnodes -o wide
 
-# Check logs
-journalctl -u fence-watcher.service -f
+# Check NNF operator logs
+kubectl logs -n nnf-system -l app=nnf-controller-manager --tail=50
 ```
 
 ### Response Not Being Read
 
 ```bash
-# Check response directory permissions
+# Check response directory permissions and NFS mount
 ls -ld /localdisk/gfs2-fencing/responses/
+mount | grep gfs2-fencing
 
 # Check fence_gfs2_recorder logs
 tail -f /var/log/gfs2-fencing/fence-events.log
+
+# Check NnfNodeBlockStorage resources
+kubectl get nnfnodeblockstorages -o yaml
 ```
 
 ### Increase Timeout
 
-If fencing takes longer than 60 seconds:
+If NNF processing takes longer than 60 seconds:
 
 ```bash
 pcs resource update compute-node-2-fence-recorder \
@@ -325,21 +237,9 @@ pcs resource update compute-node-2-fence-recorder \
 
 ## Benefits of This Pattern
 
-1. **Separation of Concerns**: Logging logic separated from fencing logic
-2. **Flexibility**: Easy to change fencing mechanism without modifying Pacemaker config
-3. **Debugging**: Request/response files make troubleshooting easier
-4. **Audit Trail**: Complete record of all fence operations
-5. **Testing**: Can simulate fencing without actual hardware actions
-6. **Custom Logic**: Implement any fencing mechanism (IPMI, cloud, PDU, custom scripts)
-
-## Migration from fence_ssh
-
-To migrate from `fence_ssh` to this pattern:
-
-1. Deploy updated `fence_gfs2_recorder`
-2. Deploy fence watcher with your fencing logic
-3. Test in development environment
-4. Disable old `fence_ssh` resources: `pcs resource disable compute-node-X-fence`
-5. Enable new recorder resources: `pcs resource enable compute-node-X-fence-recorder`
-6. Monitor logs and verify fencing works
-7. Remove old resources when confident: `pcs resource delete compute-node-X-fence`
+1. **Separation of Concerns**: GFS2 logging separated from NNF storage management
+2. **Kubernetes Integration**: Leverages existing NNF operator infrastructure
+3. **Debugging**: Request/response files provide clear audit trail for NNF operations
+4. **Storage Safety**: Ensures proper NVMe namespace detachment before node fencing
+5. **Testing**: Can simulate operations without affecting actual storage
+6. **NNF Awareness**: Native integration with NearNodeFlash storage lifecycle
