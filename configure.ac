@@ -287,6 +287,7 @@ fi
 dnl Ensure PYTHON is an absolute path
 AC_PATH_PROG([PYTHON], [$PYTHON])
 
+AC_PYTHON_MODULE(kubernetes, 1)
 AC_PYTHON_MODULE(pexpect, 1)
 AC_PYTHON_MODULE(pycurl, 1)
 AC_PYTHON_MODULE(requests, 1)
