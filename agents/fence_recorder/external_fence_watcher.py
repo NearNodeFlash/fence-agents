@@ -1,10 +1,27 @@
 #!/usr/bin/env python3
 
+# Copyright 2025 Hewlett Packard Enterprise Development LP
+# Other additional copyright holders may be indicated within.
+#
+# The entirety of this work is licensed under the Apache License,
+# Version 2.0 (the "License"); you may not use this file except
+# in compliance with the License.
+#
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """
 External Fence Watcher - Simulates external component that performs actual fencing
 
 This script watches the fence request directory and simulates performing
-the fence action, then writes a response file for fence_gfs2_recorder.
+the fence action, then writes a response file for fence_recorder.
 
 In production, replace this with your actual fencing mechanism.
 """
@@ -17,8 +34,8 @@ import logging
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-REQUEST_DIR = os.environ.get("REQUEST_DIR", "/localdisk/gfs2-fencing/requests")
-RESPONSE_DIR = os.environ.get("RESPONSE_DIR", "/localdisk/gfs2-fencing/responses")
+REQUEST_DIR = os.environ.get("REQUEST_DIR", "/localdisk/fence-recorder/requests")
+RESPONSE_DIR = os.environ.get("RESPONSE_DIR", "/localdisk/fence-recorder/responses")
 
 # Setup logging
 logging.basicConfig(
@@ -31,17 +48,46 @@ logging.basicConfig(
 class FenceRequestHandler(FileSystemEventHandler):
     """Handle fence request files"""
     
-    def on_created(self, event):
+    def __init__(self):
+        self.processed_files = set()
+    
+    def on_modified(self, event):
         if event.is_directory:
             return
         
         if not event.src_path.endswith('.json'):
             return
         
-        # Small delay to ensure file is fully written
-        time.sleep(0.1)
+        # Skip if already processed
+        if event.src_path in self.processed_files:
+            return
         
-        self.process_fence_request(event.src_path)
+        # Wait for file to be fully written
+        if self.wait_for_file_complete(event.src_path):
+            self.processed_files.add(event.src_path)
+            self.process_fence_request(event.src_path)
+    
+    def wait_for_file_complete(self, filepath, timeout=5):
+        """Wait for file to be completely written"""
+        start_time = time.time()
+        last_size = -1
+        
+        while time.time() - start_time < timeout:
+            try:
+                current_size = os.path.getsize(filepath)
+                if current_size == last_size and current_size > 0:
+                    # Size hasn't changed, file is likely complete
+                    time.sleep(0.1)  # One more small delay to be sure
+                    return True
+                last_size = current_size
+                time.sleep(0.1)
+            except (OSError, FileNotFoundError):
+                # File might be in the process of being written
+                time.sleep(0.1)
+                continue
+        
+        logging.warning(f"Timeout waiting for {filepath} to be fully written")
+        return False
     
     def process_fence_request(self, request_file):
         """Process a fence request and write response"""
@@ -52,7 +98,7 @@ class FenceRequestHandler(FileSystemEventHandler):
             request_id = request_data.get("request_id")
             action = request_data.get("action")
             target_node = request_data.get("target_node")
-            gfs2_filesystems = request_data.get("gfs2_filesystems", [])
+            filesystems = request_data.get("filesystems", [])
             
             logging.info(f"Processing fence request: id={request_id}, action={action}, target={target_node}")
             
@@ -67,8 +113,8 @@ class FenceRequestHandler(FileSystemEventHandler):
             # END OF SECTION TO REPLACE
             # ============================================================
             
-            # Write response
-            response_file = os.path.join(RESPONSE_DIR, f"{request_id}.json")
+            # Write response with target node name prefix
+            response_file = os.path.join(RESPONSE_DIR, f"{target_node}-{request_id}.json")
             response_data = {
                 "request_id": request_id,
                 "success": success,

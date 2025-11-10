@@ -1,10 +1,28 @@
 #!/usr/bin/env python3
 
+# Copyright 2025 Hewlett Packard Enterprise Development LP
+# Other additional copyright holders may be indicated within.
+#
+# The entirety of this work is licensed under the Apache License,
+# Version 2.0 (the "License"); you may not use this file except
+# in compliance with the License.
+#
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
 """
 External Fence Watcher (Simple Polling Version)
 
 This script watches the fence request directory and simulates performing
-the fence action, then writes a response file for fence_gfs2_recorder.
+the fence action, then writes a response file for fence_recorder.
 
 This version uses simple polling instead of inotify/watchdog.
 In production, replace the perform_fence_action() function with your actual fencing mechanism.
@@ -17,8 +35,8 @@ import time
 import logging
 import glob
 
-REQUEST_DIR = os.environ.get("REQUEST_DIR", "/localdisk/gfs2-fencing/requests")
-RESPONSE_DIR = os.environ.get("RESPONSE_DIR", "/localdisk/gfs2-fencing/responses")
+REQUEST_DIR = os.environ.get("REQUEST_DIR", "/localdisk/fence-recorder/requests")
+RESPONSE_DIR = os.environ.get("RESPONSE_DIR", "/localdisk/fence-recorder/responses")
 POLL_INTERVAL = float(os.environ.get("POLL_INTERVAL", "0.5"))  # Check every 500ms
 
 # Setup logging
@@ -29,14 +47,14 @@ logging.basicConfig(
 )
 
 
-def perform_fence_action(action, target_node, gfs2_filesystems):
+def perform_fence_action(action, target_node, filesystems):
     """
     Perform the actual fence action
     
     REPLACE THIS WITH YOUR ACTUAL FENCING MECHANISM
     
     Examples:
-    - Call fence_nnf or other fence agent
+    - Call fence_ipmi or other fence agent
     - Call cloud provider API (AWS, Azure, GCP)
     - Call hardware management interface (IPMI, iLO, DRAC)
     - Send command to PDU
@@ -45,29 +63,29 @@ def perform_fence_action(action, target_node, gfs2_filesystems):
     Args:
         action: "on", "off", "reboot", "status"
         target_node: hostname of node to fence
-        gfs2_filesystems: list of GFS2 filesystems on this node
+        filesystems: list of shared filesystems on this node
     
     Returns:
         tuple: (success: bool, message: str)
     """
     logging.info(f"[SIMULATED] Performing fence action: {action} on {target_node}")
-    logging.info(f"[SIMULATED] GFS2 filesystems affected: {gfs2_filesystems}")
+    logging.info(f"[SIMULATED] shared filesystems affected: {filesystems}")
     
     # ============================================================
     # REPLACE THIS SECTION WITH YOUR ACTUAL FENCING MECHANISM
     # ============================================================
     
-    # Example: Call fence_nnf
+    # Example: Call fence_ipmi
     # import subprocess
     # try:
     #     result = subprocess.run(
-    #         ["/usr/sbin/fence_nnf", "--action", action, "--plug", target_node],
+    #         ["/usr/sbin/fence_ipmi", "--action", action, "--ip", target_node],
     #         capture_output=True,
     #         text=True,
     #         timeout=30
     #     )
     #     success = result.returncode == 0
-    #     message = f"fence_nnf returned: {result.returncode}"
+    #     message = f"fence_ipmi returned: {result.returncode}"
     #     return success, message
     # except Exception as e:
     #     return False, f"Fence operation failed: {e}"
@@ -82,24 +100,52 @@ def perform_fence_action(action, target_node, gfs2_filesystems):
     # ============================================================
 
 
+def wait_for_file_complete(filepath, timeout=5):
+    """Wait for file to be completely written"""
+    start_time = time.time()
+    last_size = -1
+    
+    while time.time() - start_time < timeout:
+        try:
+            current_size = os.path.getsize(filepath)
+            if current_size == last_size and current_size > 0:
+                # Size hasn't changed, file is likely complete
+                time.sleep(0.1)  # One more small delay to be sure
+                return True
+            last_size = current_size
+            time.sleep(0.1)
+        except (OSError, FileNotFoundError):
+            # File might be in the process of being written
+            time.sleep(0.1)
+            continue
+    
+    logging.warning(f"Timeout waiting for {filepath} to be fully written")
+    return False
+
+
 def process_fence_request(request_file):
     """Process a fence request and write response"""
     try:
+        # Wait for file to be fully written before reading
+        if not wait_for_file_complete(request_file):
+            logging.error(f"File {request_file} was not fully written in time")
+            return False
+        
         with open(request_file, 'r') as f:
             request_data = json.load(f)
         
         request_id = request_data.get("request_id")
         action = request_data.get("action")
         target_node = request_data.get("target_node")
-        gfs2_filesystems = request_data.get("gfs2_filesystems", [])
+        filesystems = request_data.get("filesystems", [])
         
         logging.info(f"Processing fence request: id={request_id}, action={action}, target={target_node}")
         
         # Perform the actual fence action
-        success, message = perform_fence_action(action, target_node, gfs2_filesystems)
+        success, message = perform_fence_action(action, target_node, filesystems)
         
-        # Write response
-        response_file = os.path.join(RESPONSE_DIR, f"{request_id}.json")
+        # Write response with target node name prefix
+        response_file = os.path.join(RESPONSE_DIR, f"{target_node}-{request_id}.json")
         response_data = {
             "request_id": request_id,
             "success": success,

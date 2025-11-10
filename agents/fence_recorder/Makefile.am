@@ -2,7 +2,7 @@ MAINTAINERCLEANFILES = Makefile.in
 
 EXTRA_DIST = $(TARGET)
 
-TARGET = fence_gfs2_recorder
+TARGET = fence_recorder
 
 sbin_SCRIPTS = $(TARGET)
 
