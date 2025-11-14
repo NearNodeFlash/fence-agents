@@ -77,6 +77,11 @@ def setup_logging(log_dir):
     fence_log = os.path.join(log_dir, "fence-events.log")
     
     # Configure root logger
+    # Clear any existing handlers for Python 3.6 compatibility (force= added in 3.8)
+    root_logger = logging.getLogger()
+    if root_logger.hasHandlers():
+        root_logger.handlers.clear()
+    
     logging.basicConfig(
         level=logging.INFO,
         format='[%(asctime)s] [%(levelname)s] %(message)s',
@@ -84,8 +89,7 @@ def setup_logging(log_dir):
         handlers=[
             logging.FileHandler(fence_log),
             logging.StreamHandler(sys.stderr)
-        ],
-        force=True  # Force reconfiguration if already set up
+        ]
     )
     
     return log_dir, fence_log
