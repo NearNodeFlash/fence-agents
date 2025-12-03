@@ -1,29 +1,11 @@
-#!/usr/libexec/platform-python -tt
+#!@PYTHON@ -tt
 
-# Copyright 2025 Hewlett Packard Enterprise Development LP
-# Other additional copyright holders may be indicated within.
 #
-# The entirety of this work is licensed under the Apache License,
-# Version 2.0 (the "License"); you may not use this file except
-# in compliance with the License.
+# Fence agent that coordinates fencing with external systems via a
+# request/response file pattern. Writes fence requests to a directory,
+# waits for an external coordinator to write a response, and reports
+# the result back to Pacemaker.
 #
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-
-# Fence Recorder Agent
-#
-# This fence agent records fencing events and coordinates with external
-# systems via a request/response pattern. It integrates with Pacemaker/Corosync
-# and logs all fencing actions to structured log files, including the
-# node being fenced and relevant system context.
 
 import sys
 import os
@@ -36,31 +18,16 @@ from datetime import datetime, timezone
 import atexit
 from collections import namedtuple
 
-sys.path.append("/usr/share/fence")
-try:
-    from fencing import *  # type: ignore
-    from fencing import fail_usage, run_delay, all_opt, check_input, process_input, show_docs, atexit_handler  # type: ignore
-except ImportError:
-    # Fallback definitions for testing/development environments
-    all_opt = {}
-    def check_input(device_opt, options): return options if options else {}
-    def process_input(device_opt): return {}
-    def show_docs(options, docs): print(f"Docs: {docs.get('shortdesc', 'Fence Recorder')}")
-    def run_delay(options): pass
-    def fail_usage(message): sys.exit(1)
-    def atexit_handler(): pass
+sys.path.append("@FENCEAGENTSLIBDIR@")
+from fencing import *
+from fencing import fail_usage, run_delay, all_opt, check_input, process_input, show_docs, atexit_handler
 
-# Import configuration
-try:
-    from config import REQUEST_DIR, RESPONSE_DIR
-except ImportError:
-    # Fallback to default values if config.py not available
-    REQUEST_DIR = "/localdisk/fence-recorder/requests"
-    RESPONSE_DIR = "/localdisk/fence-recorder/responses"
+# Default directories for request/response files
+DEFAULT_REQUEST_DIR = "/var/run/fence_recorder/requests"
+DEFAULT_RESPONSE_DIR = "/var/run/fence_recorder/responses"
 
-# Configuration defaults - will be validated in main() after logging is set up
-LOG_DIR = os.environ.get("LOG_DIR", "/var/log/fence-recorder")
-# REQUEST_DIR and RESPONSE_DIR now imported from config.py
+# Configuration defaults
+LOG_DIR = os.environ.get("LOG_DIR", "/var/log/cluster")
 
 # Default values - these will be validated and possibly overridden in main()
 DEFAULT_FENCE_TIMEOUT = 60
@@ -204,12 +171,15 @@ def record_fence_event(action, target_node, status, details="", log_dir=None):
 
 def write_fence_request(action, target_node, request_dir=None):
     """
-    Write a fence request file for external fencing component to process
+    Write a fence request file for external fencing component to process.
+    
+    Uses atomic rename pattern: write to .tmp file, then rename to final name.
+    This ensures consumers only see complete files.
     
     Returns the request_id (UUID) for tracking
     """
     if request_dir is None:
-        request_dir = REQUEST_DIR
+        request_dir = DEFAULT_REQUEST_DIR
     
     # Sanitize target_node to prevent path traversal
     safe_target_node = sanitize_node_name(target_node)
@@ -217,41 +187,54 @@ def write_fence_request(action, target_node, request_dir=None):
         return None
     
     request_id = str(uuid.uuid4())
-    request_file = os.path.join(request_dir, f"{safe_target_node}-{request_id}.json")
+    filename = f"{safe_target_node}-{request_id}.json"
+    temp_file = os.path.join(request_dir, f".{filename}.tmp")
+    final_file = os.path.join(request_dir, filename)
     
     request_data = {
         "request_id": request_id,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now().astimezone().isoformat(),
         "action": action,
         "target_node": target_node,
         "recorder_node": socket.gethostname()
     }
     
     try:
-        with open(request_file, 'w') as f:
+        # Write to temp file first
+        with open(temp_file, 'w') as f:
             json.dump(request_data, f, indent=2)
-        logging.info(f"Wrote fence request: {request_file}")
+        # Atomic rename signals file is complete
+        os.rename(temp_file, final_file)
+        logging.info(f"Wrote fence request: {final_file}")
         return request_id
     except Exception as e:
         logging.error(f"Failed to write fence request: {e}")
+        # Clean up temp file if it exists
+        try:
+            os.remove(temp_file)
+        except OSError:
+            pass
         return None
 
 
 def wait_for_fence_response(request_id, target_node, timeout=60, response_dir=None, poll_interval=None):
     """
-    Wait for external fencing component to write response file
+    Wait for external fencing component to write response file.
+    
+    Only processes files that don't start with '.' (atomic rename pattern).
+    Files starting with '.' are incomplete and still being written.
     
     Args:
         request_id: UUID of the request
         target_node: Name of the node being fenced (for filename construction)
         timeout: Maximum seconds to wait for response
-        response_dir: Directory to look for response files (defaults to RESPONSE_DIR)
+        response_dir: Directory to look for response files (defaults to DEFAULT_RESPONSE_DIR)
         poll_interval: Seconds between checks (defaults to POLL_INTERVAL)
     
     Returns: (success: bool, message: str, action: str)
     """
     if response_dir is None:
-        response_dir = RESPONSE_DIR
+        response_dir = DEFAULT_RESPONSE_DIR
     if poll_interval is None:
         poll_interval = DEFAULT_POLL_INTERVAL
     
@@ -260,6 +243,7 @@ def wait_for_fence_response(request_id, target_node, timeout=60, response_dir=No
     if not safe_target_node:
         return False, "Invalid target node name", "error"
     
+    # Only look for final filename (not .tmp files)
     response_file = os.path.join(response_dir, f"{safe_target_node}-{request_id}.json")
     start_time = time.time()
     
@@ -310,7 +294,7 @@ def cleanup_old_requests(max_age_seconds=None, request_dir=None):
     if max_age_seconds is None:
         max_age_seconds = DEFAULT_CLEANUP_MAX_AGE
     if request_dir is None:
-        request_dir = REQUEST_DIR
+        request_dir = DEFAULT_REQUEST_DIR
     
     try:
         now = time.time()
@@ -328,11 +312,15 @@ def cleanup_old_requests(max_age_seconds=None, request_dir=None):
         logging.warning(f"Failed to cleanup old requests: {e}")
 
 
-def do_action_monitor(options, log_dir=None):
+def do_action_monitor(options, log_dir=None, request_dir=None, response_dir=None):
     """Monitor action - check if the fence recorder can operate"""
     
     if log_dir is None:
         log_dir = LOG_DIR
+    if request_dir is None:
+        request_dir = DEFAULT_REQUEST_DIR
+    if response_dir is None:
+        response_dir = DEFAULT_RESPONSE_DIR
 
     target = options.get("--plug", options.get("--port", "unknown"))
     
@@ -346,8 +334,8 @@ def do_action_monitor(options, log_dir=None):
     # Check directories, creating them if necessary
     dirs_to_check = {
         log_dir: os.W_OK,
-        REQUEST_DIR: os.W_OK,
-        RESPONSE_DIR: os.R_OK
+        request_dir: os.W_OK,
+        response_dir: os.R_OK
     }
 
     for path, access_mode in dirs_to_check.items():
@@ -374,18 +362,38 @@ def define_new_opts():
     all_opt["log_dir"] = {
         "getopt": ":",
         "longopt": "log-dir",
-        "help": "--log-dir=[path]          Directory for fence event logs",
+        "help": "--log-dir=[path]              Directory for fence event logs",
         "required": "0",
         "shortdesc": "Log directory",
-        "default": "/var/log/fence-recorder",
+        "default": "/var/log/cluster",
         "order": 1
+    }
+    
+    all_opt["request_dir"] = {
+        "getopt": ":",
+        "longopt": "request-dir",
+        "help": "--request-dir=[path]          Directory for fence request files",
+        "required": "0",
+        "shortdesc": "Request directory",
+        "default": DEFAULT_REQUEST_DIR,
+        "order": 2
+    }
+    
+    all_opt["response_dir"] = {
+        "getopt": ":",
+        "longopt": "response-dir",
+        "help": "--response-dir=[path]         Directory for fence response files",
+        "required": "0",
+        "shortdesc": "Response directory",
+        "default": DEFAULT_RESPONSE_DIR,
+        "order": 3
     }
 
 
 def main():
     """Main entry point"""
     
-    device_opt = ["no_password", "no_login", "port", "log_dir"]
+    device_opt = ["no_password", "no_login", "port", "log_dir", "request_dir", "response_dir"]
     
     atexit.register(atexit_handler)
     
@@ -393,18 +401,18 @@ def main():
     
     options = check_input(device_opt, process_input(device_opt))
     
+    # Get directory paths from options
+    request_dir = options.get("--request-dir", DEFAULT_REQUEST_DIR)
+    response_dir = options.get("--response-dir", DEFAULT_RESPONSE_DIR)
+    log_dir = options.get("--log-dir", LOG_DIR)
+    
     # Ensure directories exist
     try:
-        os.makedirs(REQUEST_DIR, exist_ok=True)
-        os.makedirs(RESPONSE_DIR, exist_ok=True)
+        os.makedirs(request_dir, exist_ok=True)
+        os.makedirs(response_dir, exist_ok=True)
     except Exception as e:
         print(f"[ERROR] Cannot create request/response directories: {e}", file=sys.stderr)
         sys.exit(1)
-    
-    # Setup logging with configurable log directory
-    log_dir = LOG_DIR
-    if "--log-dir" in options:
-        log_dir = options["--log-dir"]
     
     log_dir, fence_log = setup_logging(log_dir)
     logging.info(f"Logging initialized: {fence_log}")
@@ -417,24 +425,26 @@ def main():
     
     # Metadata and documentation
     docs = {}
-    docs["shortdesc"] = "Fence event recorder and coordinator"
-    docs["longdesc"] = """fence_recorder is a specialized Pacemaker fence agent that records fencing events via a request/response pattern.
+    docs["shortdesc"] = "Fence agent for request/response coordination"
+    docs["longdesc"] = """fence_recorder is a Pacemaker fence agent that coordinates fencing with external systems via a request/response file pattern.
 
-This fence agent records fencing events to structured log files and writes fence requests for external components to process. It logs comprehensive fencing information including:
+This agent writes fence requests to a directory and waits for an external coordinator to process the request and write a response file. This enables integration with external infrastructure management systems that need to perform cleanup operations before fencing is considered complete.
+
+The agent logs comprehensive fencing information including:
 - Timestamp
 - Action (reboot/off/on)
-- Target compute node
+- Target node
 - Fencing status
 
-The agent writes fence requests to {REQUEST_DIR} and waits for responses in {RESPONSE_DIR}.
+Request files are written to {request_dir} and responses are read from {response_dir}.
 
 Log Files Created:
 - {log_dir}/fence-events.log               - Main fence event log
 - {log_dir}/fence-events-readable.log      - Human-readable format
 - {log_dir}/fence-events-detailed.jsonl    - JSON Lines format for parsing
-""".format(log_dir=log_dir, REQUEST_DIR=REQUEST_DIR, RESPONSE_DIR=RESPONSE_DIR)
+""".format(log_dir=log_dir, request_dir=request_dir, response_dir=response_dir)
     
-    docs["vendorurl"] = "https://github.com/NearNodeFlash/fence-agents"
+    docs["vendorurl"] = "https://github.com/NearNodeFlash"
     
     show_docs(options, docs)
     
@@ -447,7 +457,7 @@ Log Files Created:
     
     # Handle monitor action specially
     if options["--action"] == "monitor":
-        sys.exit(do_action_monitor(options, log_dir))
+        sys.exit(do_action_monitor(options, log_dir, request_dir, response_dir))
     
     # For all other actions, use request/response pattern
     target = options.get("--plug", options.get("--port", "unknown"))
@@ -456,7 +466,7 @@ Log Files Created:
     logging.info(f"Fence action requested: {action} for target: {target}")
     
     # Cleanup old requests before creating new one (using validated max age)
-    cleanup_old_requests(cleanup_max_age, REQUEST_DIR)
+    cleanup_old_requests(cleanup_max_age, request_dir)
     
     # Record the fence event (initial log)
     record_fence_event(
@@ -468,7 +478,7 @@ Log Files Created:
     )
     
     # Write fence request for external component
-    request_id = write_fence_request(action, target, REQUEST_DIR)
+    request_id = write_fence_request(action, target, request_dir)
     
     if not request_id:
         logging.error("Failed to write fence request")
@@ -478,7 +488,7 @@ Log Files Created:
     # Wait for external fencing component to respond
     success, message, actual_action = wait_for_fence_response(
         request_id, target, timeout=fence_timeout, 
-        response_dir=RESPONSE_DIR, poll_interval=poll_interval
+        response_dir=response_dir, poll_interval=poll_interval
     )
     
     # Record the final result and respond to Pacemaker via exit code

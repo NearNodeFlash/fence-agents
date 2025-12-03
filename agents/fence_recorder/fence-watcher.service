@@ -1,5 +1,5 @@
 [Unit]
-Description=Fence Request Watcher
+Description=Fence Request Watcher - Companion service for fence_recorder
 After=network.target
 
 [Service]
@@ -12,13 +12,10 @@ StandardError=journal
 SyslogIdentifier=fence-watcher
 
 # Environment variables (optional overrides)
-# Note: fence_recorder.py uses these same environment variables
-#Environment="LOG_DIR=/var/log/fence-recorder"
-#Environment="REQUEST_DIR=/localdisk/fence-recorder/requests"
-#Environment="RESPONSE_DIR=/localdisk/fence-recorder/responses"
-#Environment="FENCE_TIMEOUT=60"
+# These must match the --request-dir and --response-dir options used with fence_recorder
+#Environment="REQUEST_DIR=/var/run/fence_recorder/requests"
+#Environment="RESPONSE_DIR=/var/run/fence_recorder/responses"
 #Environment="POLL_INTERVAL=0.5"
-#Environment="CLEANUP_MAX_AGE=300"
 
 [Install]
 WantedBy=multi-user.target

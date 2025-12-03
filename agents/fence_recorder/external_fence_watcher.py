@@ -1,29 +1,33 @@
 #!/usr/bin/env python3
 
-# Copyright 2025 Hewlett Packard Enterprise Development LP
-# Other additional copyright holders may be indicated within.
 #
-# The entirety of this work is licensed under the Apache License,
-# Version 2.0 (the "License"); you may not use this file except
-# in compliance with the License.
+# External Fence Watcher - Example companion utility for fence_recorder
 #
-# You may obtain a copy of the License at
+# This script demonstrates how to integrate with fence_recorder by watching
+# for fence request files and writing response files.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 """
-External Fence Watcher - Simulates external component that performs actual fencing
+External Fence Watcher
 
-This script watches the fence request directory and simulates performing
-the fence action, then writes a response file for fence_recorder.
+This script watches the fence request directory for requests from fence_recorder,
+performs the fence action (or simulates it), and writes a response file.
 
-In production, replace this with your actual fencing mechanism.
+This is an example implementation using simple file polling. In production,
+replace the perform_fence_action() function with your actual fencing mechanism
+(e.g., IPMI, cloud provider API, hardware management interface).
+
+Usage:
+    # Using defaults:
+    ./external_fence_watcher.py
+
+    # With custom directories (must match fence_recorder options):
+    REQUEST_DIR=/custom/requests RESPONSE_DIR=/custom/responses ./external_fence_watcher.py
+
+Environment Variables:
+    REQUEST_DIR   - Directory to watch for fence requests (default: /var/run/fence_recorder/requests)
+    RESPONSE_DIR  - Directory to write fence responses (default: /var/run/fence_recorder/responses)
+    POLL_INTERVAL - Seconds between directory checks (default: 0.5)
 """
 
 import os
@@ -31,11 +35,12 @@ import sys
 import json
 import time
 import logging
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
+import glob
 
-REQUEST_DIR = os.environ.get("REQUEST_DIR", "/localdisk/fence-recorder/requests")
-RESPONSE_DIR = os.environ.get("RESPONSE_DIR", "/localdisk/fence-recorder/responses")
+# Default directories - must match fence_recorder.py defaults
+REQUEST_DIR = os.environ.get("REQUEST_DIR", "/var/run/fence_recorder/requests")
+RESPONSE_DIR = os.environ.get("RESPONSE_DIR", "/var/run/fence_recorder/responses")
+POLL_INTERVAL = float(os.environ.get("POLL_INTERVAL", "0.5"))  # Check every 500ms
 
 # Setup logging
 logging.basicConfig(
@@ -45,120 +50,118 @@ logging.basicConfig(
 )
 
 
-class FenceRequestHandler(FileSystemEventHandler):
-    """Handle fence request files"""
+def perform_fence_action(action, target_node, filesystems):
+    """
+    Perform the actual fence action
     
-    def __init__(self):
-        self.processed_files = set()
+    REPLACE THIS WITH YOUR ACTUAL FENCING MECHANISM
     
-    def on_modified(self, event):
-        if event.is_directory:
-            return
-        
-        if not event.src_path.endswith('.json'):
-            return
-        
-        # Skip if already processed
-        if event.src_path in self.processed_files:
-            return
-        
-        # Wait for file to be fully written
-        if self.wait_for_file_complete(event.src_path):
-            self.processed_files.add(event.src_path)
-            self.process_fence_request(event.src_path)
+    Examples:
+    - Call fence_ipmi or other fence agent
+    - Call cloud provider API (AWS, Azure, GCP)
+    - Call hardware management interface (IPMI, iLO, DRAC)
+    - Send command to PDU
+    - Call custom fencing script
     
-    def wait_for_file_complete(self, filepath, timeout=5):
-        """Wait for file to be completely written"""
-        start_time = time.time()
-        last_size = -1
-        
-        while time.time() - start_time < timeout:
-            try:
-                current_size = os.path.getsize(filepath)
-                if current_size == last_size and current_size > 0:
-                    # Size hasn't changed, file is likely complete
-                    time.sleep(0.1)  # One more small delay to be sure
-                    return True
-                last_size = current_size
-                time.sleep(0.1)
-            except (OSError, FileNotFoundError):
-                # File might be in the process of being written
-                time.sleep(0.1)
-                continue
-        
-        logging.warning(f"Timeout waiting for {filepath} to be fully written")
+    Args:
+        action: "on", "off", "reboot", "status"
+        target_node: hostname of node to fence
+        filesystems: list of shared filesystems on this node
+    
+    Returns:
+        tuple: (success: bool, message: str)
+    """
+    logging.info(f"[SIMULATED] Performing fence action: {action} on {target_node}")
+    logging.info(f"[SIMULATED] shared filesystems affected: {filesystems}")
+    
+    # ============================================================
+    # REPLACE THIS SECTION WITH YOUR ACTUAL FENCING MECHANISM
+    # ============================================================
+    
+    # Example: Call fence_ipmi
+    # import subprocess
+    # try:
+    #     result = subprocess.run(
+    #         ["/usr/sbin/fence_ipmi", "--action", action, "--ip", target_node],
+    #         capture_output=True,
+    #         text=True,
+    #         timeout=30
+    #     )
+    #     success = result.returncode == 0
+    #     message = f"fence_ipmi returned: {result.returncode}"
+    #     return success, message
+    # except Exception as e:
+    #     return False, f"Fence operation failed: {e}"
+    
+    # For now, simulate fence operation
+    time.sleep(2)  # Simulate fence delay
+    
+    return True, f"Simulated fence {action} succeeded for {target_node}"
+    
+    # ============================================================
+    # END OF SECTION TO REPLACE
+    # ============================================================
+
+
+def process_fence_request(request_file):
+    """Process a fence request and write response using atomic rename pattern."""
+    # Skip hidden/temp files (files starting with '.')
+    basename = os.path.basename(request_file)
+    if basename.startswith('.'):
         return False
     
-    def process_fence_request(self, request_file):
-        """Process a fence request and write response"""
+    try:
+        with open(request_file, 'r') as f:
+            request_data = json.load(f)
+        
+        request_id = request_data.get("request_id")
+        action = request_data.get("action")
+        target_node = request_data.get("target_node")
+        filesystems = request_data.get("filesystems", [])
+        
+        logging.info(f"Processing fence request: id={request_id}, action={action}, target={target_node}")
+        
+        # Perform the actual fence action
+        success, message = perform_fence_action(action, target_node, filesystems)
+        
+        # Write response using atomic rename pattern
+        filename = f"{target_node}-{request_id}.json"
+        temp_file = os.path.join(RESPONSE_DIR, f".{filename}.tmp")
+        final_file = os.path.join(RESPONSE_DIR, filename)
+        
+        response_data = {
+            "request_id": request_id,
+            "success": success,
+            "action_performed": action,
+            "target_node": target_node,
+            "message": message,
+            "timestamp": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+        }
+        
+        # Write to temp file, then atomic rename
+        with open(temp_file, 'w') as f:
+            f.write(json.dumps(response_data, indent=2))
+        os.rename(temp_file, final_file)
+        
+        logging.info(f"Wrote fence response: success={success}, file={final_file}")
+        
+        # Clean up request file
         try:
-            with open(request_file, 'r') as f:
-                request_data = json.load(f)
-            
-            request_id = request_data.get("request_id")
-            action = request_data.get("action")
-            target_node = request_data.get("target_node")
-            filesystems = request_data.get("filesystems", [])
-            
-            logging.info(f"Processing fence request: id={request_id}, action={action}, target={target_node}")
-            
-            # ============================================================
-            # REPLACE THIS SECTION WITH YOUR ACTUAL FENCING MECHANISM
-            # ============================================================
-            
-            # Simulate fence operation (in production, do actual fencing here)
-            success = self.perform_fence_action(action, target_node)
-            
-            # ============================================================
-            # END OF SECTION TO REPLACE
-            # ============================================================
-            
-            # Write response with target node name prefix
-            response_file = os.path.join(RESPONSE_DIR, f"{target_node}-{request_id}.json")
-            response_data = {
-                "request_id": request_id,
-                "success": success,
-                "action_performed": action,
-                "target_node": target_node,
-                "message": f"Fence {action} {'succeeded' if success else 'failed'} for {target_node}",
-                "timestamp": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-            }
-            
-            with open(response_file, 'w') as f:
-                f.write(json.dumps(response_data, indent=2))
-            
-            logging.info(f"Wrote fence response: success={success}, file={response_file}")
-            
-            # Clean up request file
-            try:
-                os.remove(request_file)
-            except:
-                pass
-            
-        except Exception as e:
-            logging.error(f"Failed to process fence request {request_file}: {e}")
-    
-    def perform_fence_action(self, action, target_node):
-        """
-        Perform the actual fence action
+            os.remove(request_file)
+        except OSError:
+            pass
         
-        REPLACE THIS WITH YOUR ACTUAL FENCING MECHANISM
-        
-        Examples:
-        - Call IPMI fence agent
-        - Call cloud provider API
-        - Call hardware management interface
-        - Send command to PDU
-        etc.
-        """
-        logging.info(f"[SIMULATED] Performing fence action: {action} on {target_node}")
-        
-        # Simulate fence operation time
-        time.sleep(2)
-        
-        # In this simulation, always succeed
-        # In production, return True only if fence actually succeeded
         return True
+        
+    except Exception as e:
+        logging.error(f"Failed to process fence request {request_file}: {e}")
+        # Clean up temp file if it exists
+        try:
+            if 'temp_file' in locals():
+                os.remove(temp_file)
+        except OSError:
+            pass
+        return False
 
 
 def main():
@@ -168,25 +171,38 @@ def main():
     os.makedirs(REQUEST_DIR, exist_ok=True)
     os.makedirs(RESPONSE_DIR, exist_ok=True)
     
-    logging.info(f"Starting fence request watcher...")
+    logging.info(f"Starting fence request watcher (polling mode)...")
     logging.info(f"  Request directory: {REQUEST_DIR}")
     logging.info(f"  Response directory: {RESPONSE_DIR}")
+    logging.info(f"  Poll interval: {POLL_INTERVAL}s")
     
-    event_handler = FenceRequestHandler()
-    observer = Observer()
-    observer.schedule(event_handler, REQUEST_DIR, recursive=False)
-    observer.start()
+    processed_files = set()
     
     logging.info("Fence watcher started. Press Ctrl+C to stop.")
     
     try:
         while True:
-            time.sleep(1)
+            # Find all JSON files in request directory
+            request_files = glob.glob(os.path.join(REQUEST_DIR, "*.json"))
+            
+            for request_file in request_files:
+                # Skip if already processed
+                if request_file in processed_files:
+                    continue
+                
+                # Process the request
+                if process_fence_request(request_file):
+                    processed_files.add(request_file)
+                
+                # Cleanup processed set if it gets too large
+                if len(processed_files) > 1000:
+                    processed_files.clear()
+            
+            time.sleep(POLL_INTERVAL)
+            
     except KeyboardInterrupt:
-        observer.stop()
         logging.info("Stopping fence watcher...")
-    
-    observer.join()
+        sys.exit(0)
 
 
 if __name__ == "__main__":

@@ -9,24 +9,24 @@ The `fence_recorder` uses a **request/response pattern** to decouple fence event
 ```text
 ┌─────────────────┐         ┌──────────────────────┐          ┌──────────────────────────┐
 │   Pacemaker     │────────▶│  fence_recorder      │─────────▶│   Request Files          │
-│   (Initiates    │◀────────│  (Records & Waits)   │          │   /localdisk/fence-      │
+│   (Initiates    │◀────────│  (Records & Waits)   │          │   /var/run/fence_        │
 │    Fencing)     │  exit   │                      │          │   recorder/requests/     │
 └─────────────────┘  code   └──────────────────────┘          └──────────────────────────┘
                       ▲                   ▲                              │
                       │                   │ reads                        │ watches
                       │                   │ response                     ▼
                       │                   │                    ┌──────────────────────────┐
-                      │                   │                    │ External Storage         │
-                      │                   │                    │ Reconciler               │
-                      │                   │                    │ (External Service)       │
+                      │                   │                    │ External Responder       │
+                      │                   │                    │ (Your Implementation)    │
+                      │                   │                    │ e.g. fence_watcher       │
                       │                   │                    └──────────────────────────┘
                       │                   │                              │
                       │                   │                              │ writes
                       │                   │                              ▼
                       │         ┌──────────────────────┐       ┌──────────────────────────┐
-                      └─────────│   Response Files     │◀──────│  Storage Management      │
-                       0=success│   /localdisk/fence-  │       │  Detaches NVMe           │
-                       1=failure│   recorder/responses/│       │  from Fenced Node        │
+                      └─────────│   Response Files     │◀──────│  Fence Operations        │
+                       0=success│   /var/run/fence_    │       │  (IPMI, cloud API,       │
+                       1=failure│   recorder/responses/│       │   storage detach, etc.)  │
                                 └──────────────────────┘       └──────────────────────────┘   
 ```
 
@@ -40,13 +40,19 @@ When Pacemaker decides a node needs fencing:
 pcs stonith fence compute-node-3
 ```
 
-### 2. fence_recorder Writes Request
+### 2. fence_recorder Writes Request (Atomic)
 
-The fence agent creates a request file with the target node name and a unique ID:
+The fence agent creates a request file using atomic rename to ensure consumers only see complete files:
 
-**File**: `/localdisk/fence-recorder/requests/<node-name>-<uuid>.json`
+1. Writes to temporary file: `.<node-name>-<uuid>.json.tmp`
+2. Closes the file
+3. Renames to final name: `<node-name>-<uuid>.json`
 
-**Example**: `/localdisk/fence-recorder/requests/compute-node-3-550e8400-e29b-41d4-a716-446655440000.json`
+The rename operation triggers a file creation event and guarantees the file is complete.
+
+**File**: `/var/run/fence_recorder/requests/<node-name>-<uuid>.json`
+
+**Example**: `/var/run/fence_recorder/requests/compute-node-3-550e8400-e29b-41d4-a716-446655440000.json`
 
 ```json
 {
@@ -54,25 +60,22 @@ The fence agent creates a request file with the target node name and a unique ID
   "timestamp": "2025-10-20T14:30:00Z",
   "action": "reboot",
   "target_node": "compute-node-3",
-  "filesystems": ["lustre-fs1", "shared-storage"],
   "recorder_node": "mgmt-node-1"
 }
 ```
 
-### 3. external storage Reconciler Processes Request
+### 3. External Responder Processes Request
 
-The external storage Reconciler (external controller):
+The external responder (e.g., `external_fence_watcher.py` or your custom implementation):
 
-1. Watches the request directory for new fence requests
+1. Watches the request directory for new files (ignores files starting with `.`)
 2. Reads the request file and parses the target node
-3. Fences the node to prevent further access
-4. Writes a response file confirming the fencing action
+3. Performs the fence action
+4. Writes a response file using the same atomic rename pattern
 
-### 4. external storage Reconciler Writes Response
+**File**: `/var/run/fence_recorder/responses/<node-name>-<uuid>.json`
 
-**File**: `/localdisk/fence-recorder/responses/<node-name>-<uuid>.json`
-
-**Example**: `/localdisk/fence-recorder/responses/compute-node-3-550e8400-e29b-41d4-a716-446655440000.json`
+**Example**: `/var/run/fence_recorder/responses/compute-node-3-550e8400-e29b-41d4-a716-446655440000.json`
 
 ```json
 {
@@ -85,7 +88,7 @@ The external storage Reconciler (external controller):
 }
 ```
 
-### 5. fence_recorder Returns to Pacemaker
+### 4. fence_recorder Returns to Pacemaker
 
 The fence agent:
 
@@ -101,22 +104,12 @@ The updated version is already configured with request/response support.
 
 ### Step 2: Deploy the external storage Reconciler
 
-The external storage Reconciler is part of the external (Near Node Flash) software stack and runs as a external controller. It automatically:
+The external storage Responder is part of the external software stack and runs as a external controller. It automatically:
 
-1. Watches for fence request files in `/localdisk/fence-recorder/requests/`
+1. Watches for fence request files in `/var/run/fence_recorder/requests/`
 2. Processes fence requests by detaching NVMe namespaces from compute nodes
 3. Updates Node resources to reflect fenced status
-4. Writes response files to `/localdisk/fence-recorder/responses/`
-
-The reconciler is deployed as part of the external operator:
-
-```bash
-# Verify external operator is running
-
-# Check external storage resources
-
-# Monitor reconciler logs
-```
+4. Writes response files to `/var/run/fence_recorder/responses/`
 
 ### Step 3: Configure external Integration
 
@@ -124,13 +117,13 @@ Ensure the external software has access to the fence request/response directorie
 
 ```bash
 # Verify directories exist and are accessible
-ls -la /localdisk/fence-recorder/
-ls -la /localdisk/fence-recorder/requests/
-ls -la /localdisk/fence-recorder/responses/
+ls -la /var/run/fence_recorder/
+ls -la /var/run/fence_recorder/requests/
+ls -la /var/run/fence_recorder/responses/
 
 # Check permissions (should be writable by external services)
-stat /localdisk/fence-recorder/requests/
-stat /localdisk/fence-recorder/responses/
+stat /var/run/fence_recorder/requests/
+stat /var/run/fence_recorder/responses/
 ```
 
 ### Step 4: Test the Integration
@@ -140,11 +133,11 @@ stat /localdisk/fence-recorder/responses/
 pcs stonith fence rabbit-compute-2
 
 # Check request was created and processed
-ls -l /localdisk/fence-recorder/requests/
-ls -l /localdisk/fence-recorder/responses/
+ls -l /var/run/fence_recorder/requests/
+ls -l /var/run/fence_recorder/responses/
 
 # Check fence logs
-tail /var/log/fence-recorder/fence-events-readable.log
+tail /var/log/cluster/fence-events-readable.log
 
 # Verify Node status
 
@@ -153,45 +146,41 @@ tail /var/log/fence-recorder/fence-events-readable.log
 
 ## Configuration
 
-### Configuration Files
+### Configuration
 
-The fence agent uses a hybrid approach: critical paths are hardcoded in `config.py` while runtime settings use environment variables:
+The fence agent uses command-line options for directory paths and environment variables for runtime settings:
 
 | Setting | Source | Default | Description |
 |---------|--------|---------|-------------|
-| `REQUEST_DIR` | `config.py` | `/localdisk/fence-recorder/requests` | Directory for fence requests |
-| `RESPONSE_DIR` | `config.py` | `/localdisk/fence-recorder/responses` | Directory for fence responses |
+| `--request-dir` | Command line | `/var/run/fence_recorder/requests` | Directory for fence requests |
+| `--response-dir` | Command line | `/var/run/fence_recorder/responses` | Directory for fence responses |
+| `--log-dir` | Command line | `/var/log/cluster` | Directory for fence event logs |
 | `FENCE_TIMEOUT` | Environment | `60` | Timeout in seconds to wait for external response |
-| `LOG_DIR` | Environment | `/var/log/fence-recorder` | Directory for fence event logs |
 
-### config.py
+### Directory Configuration
 
-The request/response directories are shared between the fence agent and external software, configured in `config.py`:
+The request/response directories must be accessible by both the fence agent and the external responder:
 
-```python
-# Directory where fence agents write fence request files
-REQUEST_DIR = "/localdisk/fence-recorder/requests"
-
-# Directory where nnf-sos writes fence response files
-RESPONSE_DIR = "/localdisk/fence-recorder/responses"
+```bash
+# Create directories with appropriate permissions
+sudo mkdir -p /var/run/fence_recorder/{requests,responses}
+sudo chmod 755 /var/run/fence_recorder/{requests,responses}
 ```
 
-**Important**: These paths must match between the fence agent and external repositories. If you modify `config.py`, ensure both repositories are updated.
+**Important**: These paths must match between the fence agent (`--request-dir`, `--response-dir`) and the external responder (e.g., `external_fence_watcher.py` environment variables).
 
 ### Pacemaker Configuration
 
 Configure timeout and log directory in the stonith resource:
 
 ```bash
-# Using environment variables (recommended)
-pcs resource update compute-node-2-fence-recorder \
-    meta env="FENCE_TIMEOUT=90" \
-    meta env="LOG_DIR=/custom/log/path"
-
-# Alternative: Using command-line options
-pcs resource update compute-node-2-fence-recorder \
-    op monitor interval=60s \
-    params log-dir="/custom/log/path"
+# Using command-line options
+pcs stonith create compute-node-2-fence fence_recorder \
+    port=compute-node-2 \
+    request-dir="/var/run/fence_recorder/requests" \
+    response-dir="/var/run/fence_recorder/responses" \
+    log-dir="/var/log/cluster" \
+    op monitor interval=60s
 ```
 
 **Note**: Environment variables take precedence over command-line options.
@@ -212,11 +201,11 @@ pcs resource update compute-node-2-fence-recorder \
 
 ```bash
 # Check response directory permissions and NFS mount
-ls -ld /localdisk/fence-recorder/responses/
+ls -ld /var/run/fence_recorder/responses/
 mount | grep fence-recorder
 
 # Check fence_recorder logs
-tail -f /var/log/fence-recorder/fence-events.log
+tail -f /var/log/cluster/fence-events.log
 
 # Check external storage resources
 ```
@@ -232,9 +221,9 @@ pcs resource update compute-node-2-fence-recorder \
 
 ## Benefits of This Pattern
 
-1. **Separation of Concerns**: filesystem logging separated from external storage management
-2. **External system Integration**: Leverages existing external operator infrastructure
-3. **Debugging**: Request/response files provide clear audit trail for external operations
-4. **Storage Safety**: Ensures proper NVMe namespace detachment before node fencing
-5. **Testing**: Can simulate operations without affecting actual storage
-6. **NNF Awareness**: Native integration with external system storage lifecycle
+1. **Separation of Concerns**: Fencing coordination separated from actual fence operations
+2. **External System Integration**: Allows integration with storage systems, cloud providers, or custom fencing logic
+3. **Debugging**: Request/response files provide clear audit trail for all operations
+4. **Storage Safety**: Ensures proper resource detachment before node fencing
+5. **Testing**: Can simulate operations without affecting actual infrastructure
+6. **Flexibility**: Works with any external responder that follows the file protocol
